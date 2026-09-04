@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oss-agent"
+version = "0.1.0"
+description = "Human-in-the-loop open-source contribution copilot: discover, evaluate, implement, validate, learn from, and prepare GitHub contributions — with explicit human approval before anything is published."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "OSS-Agent" }]
+keywords = ["open-source", "automation", "claude", "agents", "github"]
+
+# Runtime dependencies are intentionally minimal. Everything that can be done
+# with the standard library is done with the standard library.
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "SQLAlchemy>=2.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+oss-agent = "oss_agent.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+oss_agent = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: multi-component integration tests",
+    "e2e: end-to-end workflow tests against a local fake repository",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["oss_agent"]

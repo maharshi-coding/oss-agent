@@ -1,0 +1,66 @@
+# OSS-Agent developer profile.
+# Copy to config/user-profile.yaml and edit. The contribution scorer uses this
+# profile to compute the "skill match" dimension and to filter opportunities.
+
+name: "Jane Developer"
+
+# Languages you are comfortable contributing in. Weight 0.0-1.0 signals confidence.
+languages:
+  python: 1.0
+  typescript: 0.7
+  go: 0.4
+  rust: 0.2
+
+# Frameworks / libraries you know well.
+frameworks:
+  - fastapi
+  - pydantic
+  - pytest
+  - react
+
+# Problem domains you enjoy or avoid.
+domains:
+  - developer-tools
+  - cli
+  - data
+  - web-backend
+
+excluded_domains:
+  - crypto
+  - gambling
+  - adtech
+
+# Overall experience level: beginner | intermediate | advanced | expert
+experience_level: advanced
+
+# Contribution types you prefer, most-preferred first.
+# Allowed: bug_fix, feature, documentation, test, refactor, performance,
+#          dependency, ci, chore
+preferred_contribution_types:
+  - bug_fix
+  - documentation
+  - test
+  - feature
+
+# Project size preference by star count buckets.
+# Allowed: small | medium | large | any
+preferred_project_size: medium
+
+# Issue difficulty you want to target.
+# Allowed: trivial | easy | moderate | hard | any
+preferred_difficulty: easy
+
+# Hard filters applied during discovery.
+filters:
+  min_stars: 50
+  max_stars: 50000
+  require_contributing_guide: false
+  require_tests: true
+  exclude_archived: true
+  allowed_licenses:
+    - MIT
+    - Apache-2.0
+    - BSD-3-Clause
+    - BSD-2-Clause
+    - ISC
+    - MPL-2.0

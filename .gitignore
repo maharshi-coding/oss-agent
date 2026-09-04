@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration & secrets
+.env
+.env.*
+!.env.example
+config/user-profile.yaml
+config/scoring.yaml
+
+# Runtime state (workflow database, logs, worktrees)
+.oss-agent/
+*.db
+*.sqlite3
+workflows/*.json
+worktrees/
+!workflows/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

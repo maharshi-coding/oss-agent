@@ -1,0 +1,50 @@
+# OSS-Agent scoring configuration.
+# Copy to config/scoring.yaml to override the built-in defaults. Weights are
+# normalized automatically, so they need not sum to exactly 1.0, but keeping
+# them readable (summing to 1.0) is recommended.
+
+weights:
+  issue_clarity: 0.20
+  implementation_confidence: 0.20
+  repository_health: 0.15
+  maintainer_activity: 0.15
+  testability: 0.10
+  skill_match: 0.10
+  contribution_value: 0.05
+  issue_freshness: 0.05
+
+# Penalties are subtracted from the final 0-100 score after weighting.
+# Each penalty is (multiplier * severity_signal), clamped by `max`.
+penalties:
+  ambiguity:
+    max: 20
+  high_complexity:
+    max: 15
+  duplicate_risk:
+    max: 25
+  breaking_change:
+    max: 20
+  security_sensitivity:
+    max: 15
+
+# Recommendation thresholds applied to the final penalized score.
+thresholds:
+  strong_pursue: 75   # >= -> STRONG_PURSUE
+  pursue: 60          # >= -> PURSUE
+  consider: 45        # >= -> CONSIDER
+  # below `consider` -> SKIP
+
+# Contribution-suitability weights (a separate question from technical scoring:
+# should a contribution be made here at all?). Omit any dimension to keep its
+# default; unknown keys are ignored; negative weights are rejected. Normalized
+# automatically. Hard blockers (existing PR, assignee, archived, closed) always
+# apply regardless of these weights.
+suitability:
+  issue_clarity: 0.15
+  maintainer_intent: 0.20
+  existing_work: 0.15
+  repository_health: 0.10
+  guidelines_fit: 0.10
+  scope_appropriateness: 0.10
+  technical_confidence: 0.10
+  skill_match: 0.10
