@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Optional, Type, TypeVar
 
@@ -92,6 +93,22 @@ class ClaudeAgentRunner(AgentRunner):
         self._bin = self._resolve_bin(claude_bin)
         self._runner = runner or CommandRunner(default_timeout=900)
         self._model = model
+        self._scratch: Optional[str] = None
+
+    def _reasoning_cwd(self) -> str:
+        """An isolated, empty working directory for read-only reasoning calls.
+
+        Reasoning agents (analyze/plan/review/...) are pure functions of their
+        *inline* prompt — they never need the process CWD. Running them in an
+        empty scratch dir prevents the model from inheriting whatever repository
+        happens to be the current directory as project context (e.g. OSS-Agent's
+        own ``CLAUDE.md``) and from wandering the filesystem. Created lazily and
+        reused for the life of the runner. (Discovered in live validation: run in
+        the OSS-Agent repo, the model picked up this project's instructions and
+        analysed the wrong thing.)"""
+        if self._scratch is None or not os.path.isdir(self._scratch):
+            self._scratch = tempfile.mkdtemp(prefix="oss-agent-reasoning-")
+        return self._scratch
 
     @staticmethod
     def _resolve_bin(name: str) -> str:
@@ -116,11 +133,33 @@ class ClaudeAgentRunner(AgentRunner):
         cwd: Optional[str] = None,
         allow_edits: bool = False,
     ) -> BackendInvocation:
-        args = [self._bin, "-p", prompt, "--output-format", "json"]
+        # The prompt is delivered on STDIN, never as an argv element. On Windows
+        # the ``claude`` entry point is a ``.CMD`` shim; a large multi-line prompt
+        # (the JSON schema's quotes/braces plus embedded newlines) passed as a
+        # positional argument is re-parsed by cmd.exe and truncated at the first
+        # newline — silently dropping both the real task AND the trailing flags
+        # (so ``--output-format json`` never took effect and the model replied
+        # with prose). Piping via stdin sidesteps command-line escaping and
+        # length limits on every platform. (Discovered during live validation:
+        # the model complained "no schema/task data was included" because only
+        # the first line of the prompt survived.)
+        args = [self._bin, "-p", "--output-format", "json"]
         if self._model:
             args += ["--model", self._model]
-        args += ["--permission-mode", "acceptEdits" if allow_edits else "plan"]
-        result = self._runner.run(args, cwd=cwd, enforce_safety=True)
+        if allow_edits:
+            # The implementer edits files autonomously inside the worktree.
+            args += ["--permission-mode", "acceptEdits"]
+            run_cwd = cwd
+        else:
+            # Read-only reasoning: a single-shot text->JSON completion. NOT `plan`
+            # mode — that is Claude Code's interactive plan workflow, whose system
+            # reminder supersedes the task, restricts the model to exploration, and
+            # expects to end via ExitPlanMode; headless, it simply refuses to emit
+            # the JSON. `default` mode returns the answer directly. Run it in an
+            # isolated scratch dir (never the caller's CWD).
+            args += ["--permission-mode", "default"]
+            run_cwd = self._reasoning_cwd()
+        result = self._runner.run(args, cwd=run_cwd, input_text=prompt, enforce_safety=True)
         invocation = BackendInvocation(
             raw=result.stdout,
             exit_code=result.exit_code,
