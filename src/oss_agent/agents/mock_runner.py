@@ -299,8 +299,24 @@ class MockAgentRunner(AgentRunner):
         return ""
 
     def _extract_expected(self, body: str) -> str:
-        m = re.search(r"(?i)expected[:\s]+(.+?)(?:\n\n|\Z)", body, re.DOTALL)
-        return re.sub(r"\s+", " ", m.group(1)).strip()[:300] if m else ""
+        # Ignore fenced code blocks so a reproduction comment like
+        # "# returns -1, expected 5" is never mistaken for the spec.
+        stripped = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+        # Prefer an explicit "Expected [behavior]" markdown section.
+        m = re.search(
+            r"(?im)^#{1,6}\s*expected[^\n]*\n+(.+?)(?:\n#{1,6}\s|\n\s*\n|\Z)",
+            stripped, re.DOTALL,
+        )
+        if not m:
+            # Fall back to an inline "expected ...:" phrase, but require it to be
+            # followed by real words (not a bare number from a code comment).
+            m = re.search(
+                r"(?i)\bexpected(?:\s+behaviou?r)?\b[:\s]+((?=[^\n]*[a-z]{3})[^\n]{3,}?)(?:\n\s*\n|\Z)",
+                stripped, re.DOTALL,
+            )
+        if not m:
+            return ""
+        return re.sub(r"\s+", " ", m.group(1)).strip()[:300]
 
     def _extract_criteria(self, body: str) -> list[str]:
         criteria = []
@@ -600,8 +616,17 @@ class MockAgentRunner(AgentRunner):
         changed = [fc.path for fc in (s.implementation.files_changed if s.implementation else [])]
         tests_line = ""
         if s.test_result:
-            passed = s.test_result.total_tests_passed
-            tests_line = f"- Tests: {passed} passed across {len(s.test_result.suites)} suite(s)\n"
+            tr = s.test_result
+            # Truthful evidence: distinguish executed suites from skipped ones so
+            # the PR never implies a skipped check passed.
+            tests_line = (
+                f"- Tests: {tr.total_tests_passed} passed across "
+                f"{len(tr.executed_suites)} executed suite(s)"
+            )
+            if tr.skipped_suites:
+                tests_line += f" ({len(tr.skipped_suites)} skipped: " \
+                              f"{', '.join(x.name for x in tr.skipped_suites)})"
+            tests_line += "\n"
         summary_block = (
             f"## Summary\n\n{plan.objective if plan else ''}\n\n"
             f"Closes #{issue_no}.\n\n"
