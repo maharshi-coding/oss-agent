@@ -17,7 +17,9 @@ fabricating output. Offline development and tests use
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from dataclasses import dataclass
 from typing import Any, Optional, Type, TypeVar
 
@@ -87,9 +89,24 @@ class ClaudeAgentRunner(AgentRunner):
         runner: Optional[CommandRunner] = None,
         model: Optional[str] = None,
     ) -> None:
-        self._bin = claude_bin
+        self._bin = self._resolve_bin(claude_bin)
         self._runner = runner or CommandRunner(default_timeout=900)
         self._model = model
+
+    @staticmethod
+    def _resolve_bin(name: str) -> str:
+        """Resolve a bare command name to a full path via PATH.
+
+        Needed on Windows: the npm-installed ``claude`` is a ``.CMD`` shim, and
+        ``subprocess`` (no shell) does not apply PATHEXT to a bare name, so
+        ``["claude", ...]`` fails with exit 127 even when it is installed.
+        ``shutil.which`` honors PATHEXT and returns the ``.CMD`` path, which
+        subprocess can launch. A path with a separator is used as-is; if nothing
+        is found, the original name is returned so the missing-CLI error path
+        still fires."""
+        if os.sep in name or (os.altsep and os.altsep in name):
+            return name
+        return shutil.which(name) or name
 
     # -- CLI invocation -------------------------------------------------------
     def _invoke(
@@ -122,11 +139,74 @@ class ClaudeAgentRunner(AgentRunner):
                 f"claude invocation timed out after {result.duration_seconds:.0f}s; "
                 "workflow state is preserved — resume to retry."
             )
+        # The `--output-format json` envelope reports CLI-level failures (auth,
+        # billing, api errors) inside its `is_error`/`result` fields — sometimes
+        # WITH exit 0. Inspect it before trusting the exit code, and map auth
+        # failures to a configuration error with an actionable message. (Discovered
+        # during live validation: an expired OAuth session returned the real reason
+        # only in the JSON `result`, with an empty stderr.)
+        env_error = self._envelope_error(result.stdout)
+        if env_error is not None:
+            is_auth, message = env_error
+            if is_auth:
+                raise self._auth_error(message)
+            raise AgentError(f"claude reported an error: {message}")
         if not result.ok:
-            raise AgentError(
-                f"claude invocation failed ({result.exit_code}): {result.tail('stderr')}"
-            )
+            # The failure reason may be plain text on stdout/stderr rather than a
+            # JSON envelope (observed on Windows with a large prompt: an expired
+            # OAuth session prints the reason as plain text). Classify auth here too.
+            detail = (result.tail("stderr") or result.tail("stdout") or "no output").strip()
+            if self._looks_like_auth(detail):
+                raise self._auth_error(detail)
+            raise AgentError(f"claude invocation failed ({result.exit_code}): {detail}")
         return invocation
+
+    def _auth_error(self, message: str) -> BackendUnavailableError:
+        return BackendUnavailableError(
+            f"the 'claude' CLI is not authenticated: {message[:200]}. "
+            "Run `claude` and sign in (or set ANTHROPIC_API_KEY / "
+            "OSS_AGENT_AGENT_BACKEND=mock)."
+        )
+
+    def _looks_like_auth(self, text: str) -> bool:
+        low = (text or "").lower()
+        return any(hint in low for hint in self._AUTH_HINTS)
+
+    # Words in a CLI error that indicate an authentication/authorization problem
+    # (a configuration issue) rather than a transient failure.
+    _AUTH_HINTS = (
+        "authenticat", "oauth", "unauthorized", "log in", "login", "sign in",
+        "session expired", "not logged in", "invalid api key", "credit balance",
+        "billing", "403", "401",
+    )
+
+    def _envelope_error(self, raw: str) -> Optional[tuple[bool, str]]:
+        """If the CLI JSON envelope signals an error, return (is_auth, message).
+
+        Returns ``None`` when the output is not an error envelope (normal path)."""
+        text = (raw or "").strip()
+        if not text:
+            return None
+        env: Any
+        try:
+            env = json.loads(text)
+        except json.JSONDecodeError:
+            # The CLI shim (e.g. a Windows .CMD wrapper) can prepend noise before
+            # the JSON; fall back to extracting the first balanced object.
+            env = self._extract_json_object(text)
+        if not isinstance(env, dict):
+            return None
+        is_error = bool(env.get("is_error")) or env.get("terminal_reason") == "api_error"
+        if not is_error:
+            return None
+        message = ""
+        for key in ("result", "error", "message"):
+            val = env.get(key)
+            if isinstance(val, str) and val.strip():
+                message = val.strip()
+                break
+        message = message or "unspecified backend error"
+        return self._looks_like_auth(message), message[:300]
 
     def _parse(self, raw: str, model: Type[T]) -> T:
         text = raw.strip()

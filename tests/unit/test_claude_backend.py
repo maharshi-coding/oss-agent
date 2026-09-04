@@ -123,6 +123,80 @@ def test_invalid_schema_raises_agent_error():
         runner.analyze_issue(_issue_ctx())
 
 
+# --- envelope error handling (regression: discovered during live validation) ---
+# A real expired-OAuth response from `claude -p ... --output-format json`:
+_AUTH_ENVELOPE = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True,
+    "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "terminal_reason": "api_error", "num_turns": 1,
+})
+
+
+def test_expired_auth_envelope_maps_to_backend_unavailable():
+    # Exit 1 with the real auth message only in the JSON `result` (empty stderr).
+    runner, _ = _runner_with(_result(stdout=_AUTH_ENVELOPE, exit_code=1))
+    with pytest.raises(BackendUnavailableError) as exc:
+        runner.analyze_issue(_issue_ctx())
+    assert "not authenticated" in str(exc.value).lower()
+
+
+def test_error_envelope_with_exit_zero_is_still_detected():
+    # The CLI sometimes returns is_error with exit 0 — must not be trusted as ok.
+    runner, _ = _runner_with(_result(stdout=_AUTH_ENVELOPE, exit_code=0))
+    with pytest.raises(BackendUnavailableError):
+        runner.analyze_issue(_issue_ctx())
+
+
+def test_non_auth_error_envelope_maps_to_agent_error():
+    env = json.dumps({"is_error": True, "result": "model overloaded, try again",
+                      "terminal_reason": "api_error"})
+    runner, _ = _runner_with(_result(stdout=env, exit_code=1))
+    with pytest.raises(AgentError) as exc:
+        runner.analyze_issue(_issue_ctx())
+    assert "overloaded" in str(exc.value)
+
+
+def test_plain_text_auth_error_maps_to_backend_unavailable():
+    # Real Windows behavior with a large prompt: the CLI prints the auth failure
+    # as plain text on stdout (not a JSON envelope), with a non-zero exit.
+    runner, _ = _runner_with(_result(
+        stdout="Failed to authenticate: OAuth session expired and could not be refreshed\n",
+        exit_code=1,
+    ))
+    with pytest.raises(BackendUnavailableError) as exc:
+        runner.analyze_issue(_issue_ctx())
+    assert "not authenticated" in str(exc.value).lower()
+
+
+def test_plain_text_generic_error_stays_agent_error():
+    runner, _ = _runner_with(_result(stdout="some other failure\n", exit_code=1))
+    with pytest.raises(AgentError) as exc:
+        runner.analyze_issue(_issue_ctx())
+    assert not isinstance(exc.value, BackendUnavailableError)
+
+
+def test_success_envelope_is_not_treated_as_error():
+    # A normal success envelope (is_error false) must still parse cleanly.
+    env = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": json.dumps(_ISSUE_JSON)})
+    runner, _ = _runner_with(_result(stdout=env))
+    analysis = runner.analyze_issue(_issue_ctx())
+    assert analysis.issue_number == 101
+
+
+def test_resolve_bin_uses_path_and_falls_back(monkeypatch):
+    from oss_agent.agents import claude_runner as cr
+
+    # A bare name is resolved via PATH (so a Windows .CMD shim is launchable).
+    monkeypatch.setattr(cr.shutil, "which", lambda n: "/resolved/path/claude.CMD")
+    assert ClaudeAgentRunner._resolve_bin("claude") == "/resolved/path/claude.CMD"
+    # When nothing is found, the original name is kept (missing-CLI path fires).
+    monkeypatch.setattr(cr.shutil, "which", lambda n: None)
+    assert ClaudeAgentRunner._resolve_bin("claude") == "claude"
+    # An explicit path is used as-is (not re-resolved).
+    assert ClaudeAgentRunner._resolve_bin("/opt/bin/claude") == "/opt/bin/claude"
+
+
 def test_untrusted_issue_content_is_wrapped_in_trust_boundary():
     runner, fake = _runner_with(_result(stdout=json.dumps(_ISSUE_JSON)))
     runner.analyze_issue(_issue_ctx())
