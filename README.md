@@ -205,15 +205,18 @@ breakdown):
 
 - **Read path (discovery/analysis/scoring/suitability):** real, and **validated
   read-only against live public repositories** via the authenticated `gh` CLI.
+- **Write path (push + PR creation):** **real-world validated against an owned
+  private sandbox** — the full workflow ran with a real `gh` backend, real git
+  clone, isolated worktree, real `pytest`, and a real human-approved pull request
+  (cross-checked on GitHub). It is **not** run against third-party repositories by
+  design: OSS-Agent will not open unsolicited AI PRs; use it on your own repos/forks.
 - **Local implementation + repair via the `claude` backend:** a real subprocess
-  integration whose invocation/parse/error handling is unit-tested, but the live
-  model round-trip is **experimental** — exercised only on a machine with an
-  authenticated Claude Code install, not in CI. Offline/tests use the deterministic
-  `mock` runner, which delegates the *implementer* step to a solution strategy.
-- **Write path (push + PR creation):** implemented and integration-tested against
-  the in-memory GitHub adapter, but **not exercised against live third-party
-  repositories** — by design. OSS-Agent will not open unsolicited AI PRs; use it on
-  your own repositories/forks.
+  integration whose invocation/parse/error handling is validated against the real
+  `claude` CLI (and hardened for Windows exec resolution + auth-error surfacing).
+  The **live model round-trip is not yet real-world validated** — during validation
+  the local CLI's OAuth session was expired; re-authenticating `claude` and re-running
+  closes this gap. Offline/tests use the deterministic `mock` runner, which delegates
+  the *implementer* step to a solution strategy.
 - The `api` (direct REST) GitHub backend is intentionally not implemented; use
   `gh` (recommended) or `mock`. The interface and factory are ready for it.
 - Scoring/analysis heuristics in the mock runner are deliberate, transparent

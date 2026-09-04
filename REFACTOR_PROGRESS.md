@@ -633,3 +633,109 @@ upgrades the Phase 3 "repository context" item from PARTIAL to **COMPLETE**.
 
 **Updated totals after enhancements:** 67 modules, **162 tests passing**, 21 test
 files. Suite stayed green throughout (147 → 152 → 154 → 155 → 160 → 162).
+
+---
+
+# LIVE VALIDATION (git baseline + real backends)
+
+Goal: move from "extensively tested but partially live-unvalidated" to
+version-controlled + genuinely validated. Executed on a Windows 11 machine.
+
+## Git baseline
+- Working tree audited before staging: `.gitignore` already excludes `.venv/`,
+  caches, `.coverage`, `.oss-agent/`, `*.db`, worktrees, `.env*` (keeps
+  `.env.example`) and local `config/*.yaml`. **No real secrets committed** — the
+  project's own scanner flagged only `tests/unit/test_safety.py`, confirmed to be
+  synthetic fixtures (`AKIA…`, a bare PEM header, `sk_live_0123…`, `hunter2…`).
+- Initial commit `ed15349` (151 files) on `master`. Development branch
+  **`feat/live-backend-validation`** for all validation work.
+- Lint/type-check: **NOT CONFIGURED** (no ruff/mypy/flake8 in `pyproject.toml`) —
+  reported honestly, not invented.
+
+## Claude implementation backend
+- Backend: real `claude` CLI **v2.1.260**, invoked as a subprocess through the
+  controlled `CommandRunner` (the production path).
+- **Real authenticated model round-trip: BLOCKED BY AUTHENTICATION.** The CLI's
+  OAuth session was expired (`is_error: true`,
+  `result: "Failed to authenticate: OAuth session expired and could not be refreshed"`)
+  and cannot be refreshed non-interactively; no `ANTHROPIC_API_KEY` fallback. The
+  live model therefore did **not** generate an implementation. This is reported
+  honestly rather than faked.
+- **Real invocation path: VALIDATED**, and it exposed two genuine bugs (now fixed,
+  commit `f7589c7`, with regression tests using the real captured output):
+  1. Windows exec resolution — `subprocess(["claude", …])` exits 127 because the
+     npm shim is a `.CMD` and CreateProcess ignores PATHEXT for a bare name. Fixed
+     via `shutil.which`; the default runner now reaches the real CLI.
+  2. Auth-failure surfacing — the reason is in the JSON envelope `result` (small
+     prompt) or plain-text stdout (large prompt), never stderr; OSS-Agent produced
+     an empty/misclassified error. Now mapped to `BackendUnavailableError` with an
+     actionable message. Verified against the real CLI: the default
+     `ClaudeAgentRunner()` now raises a clear auth error.
+- Repair loop: **NOT live-validated with the real model** (auth-blocked). It
+  remains INTEGRATION-tested (a never-fixing solution drives the real
+  implement→test→repair loop over real pytest; see `tests/integration/test_attempts.py`).
+
+## GitHub write path — real, against an OWNED private sandbox
+- Sandbox: **`maharshi-coding/oss-agent-sandbox`** (private, created via `gh`),
+  a tiny project with an intentional `add()` bug + real issue **#1**.
+- Full workflow run through OSS-Agent with the **real `gh` backend + real git
+  clone + isolated worktree + real pytest**; the AI *implementation* step was
+  provided deterministically (mock solution) because the live model is
+  auth-blocked — labeled honestly. Result: discovery → repo analysis → issue
+  analysis → **score 74.5/PURSUE** → **suitability EXCELLENT (82)** → real clone +
+  worktree (`fix/issue-1`) → context (located `calculator.py`, symbols
+  `add`/`multiply`) → plan → fix → **real pytest: 3 passed** → reviews →
+  `READY_FOR_PR`. It **stopped at the human gate** (no auto-push).
+- Persistence/resume: a **fresh engine over the same SQLite DB** reloaded the
+  workflow (plan/impl/tests/attempts/context all persisted) and continued.
+- Human gates: `prepare_pr` pushed nothing; `submit` was **refused before
+  approval** (`HumanApprovalRequired`); after explicit approval + confirmation the
+  pre-submission conflict re-check passed, then the branch was pushed and **real
+  PR #2 was created** → `PR_MONITORING`.
+- Independently cross-checked on GitHub (not trusting OSS-Agent): PR #2 OPEN,
+  `base=main ← head=fix/issue-1`, references #1, diff is exactly
+  `-return a - b` / `+return a + b`, remote branch exists, issue #1 still OPEN,
+  DB holds the PR metadata. **PR not merged** (left inspectable).
+- This run exposed two PR-body quality bugs (fixed, commit `42690e8`, with
+  regression tests): a reproduction code-comment leaking "5" into the Summary, and
+  a verification line counting skipped suites as executed. PR #2's body was then
+  regenerated truthfully via the fixed composer and updated on GitHub.
+
+## Visualizer
+- Rendered from the real sandbox workflow snapshot: correct repo/issue, **PR #2**,
+  all nine stages `done`, and the event stream shows the **actual** persisted
+  events (`PR #2 created`, `monitoring PR`) — not fake timer activity.
+
+## Final tests
+- **174 passing / 0 failing** (was 162). +12 regression tests across the two
+  live-validation fixes. No test patches the sandbox environment; fixes are in the
+  product code.
+
+## Bugs discovered during live validation
+1. Windows `claude` exec resolution (127 despite install). — fixed `f7589c7`
+2. Claude auth failure surfaced as empty/misclassified error. — fixed `f7589c7`
+3. `_extract_expected` leaked a code-comment number into the PR body. — fixed `42690e8`
+4. PR verification line counted skipped suites as executed. — fixed `42690e8`
+
+## Final capability matrix
+- GitHub read path: **REAL-WORLD VALIDATED** (public `pallets/click` + private sandbox).
+- GitHub write path (push + PR): **REAL-WORLD VALIDATED against owned sandbox** (PR #2).
+- Local implementation / test / repair mechanics: **END-TO-END VALIDATED** (real
+  clone/worktree/pytest; repair loop integration-tested).
+- Claude implementation backend: **invocation path REAL-CLI VALIDATED; live model
+  round-trip BLOCKED BY AUTHENTICATION** (expired OAuth) — not yet real-world
+  validated.
+- Safety / human review / PR preparation / persistence / visualizer: validated in
+  the real run above.
+- Third-party OSS submission: **HUMAN-CONTROLLED BY DESIGN** (never automated).
+
+## Final judgment
+**PARTIALLY.** OSS-Agent genuinely performs the intended workflow end-to-end
+against a real (owned) GitHub repository — discovery, analysis, scoring,
+suitability, real repository setup, context, planning, real test execution,
+review, learning, human gates, and a real human-approved PR — all cross-verified
+on GitHub. The **one** unproven link is the live Claude model generating the
+implementation, which is blocked purely by an expired local OAuth session (an
+environment/auth issue, not a code defect); the real invocation path to that model
+is validated and hardened. Re-authenticating `claude` and re-running the sandbox
+flow would close the remaining gap.
