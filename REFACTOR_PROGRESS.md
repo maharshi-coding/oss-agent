@@ -448,7 +448,8 @@ This upgrades the production **read path** from "structurally present" to
 **REAL-WORLD VALIDATED**. The **write path** (push + PR creation) and the live
 **Claude implementation** backend remain EXPERIMENTAL (not exercised here — writes
 are deliberately withheld, and the Claude CLI round-trip needs an authenticated
-install).
+install). *(Both were later REAL-WORLD VALIDATED — see the write-path (PR #2) and
+"Final authenticated Claude validation" (PR #4) sections below.)*
 
 Network-dependent validation is kept out of the automated suite; all CI tests use
 the network-free in-memory adapter + real local git/pytest.
@@ -655,12 +656,13 @@ version-controlled + genuinely validated. Executed on a Windows 11 machine.
 ## Claude implementation backend
 - Backend: real `claude` CLI **v2.1.260**, invoked as a subprocess through the
   controlled `CommandRunner` (the production path).
-- **Real authenticated model round-trip: BLOCKED BY AUTHENTICATION.** The CLI's
-  OAuth session was expired (`is_error: true`,
+- **Real authenticated model round-trip: REAL-WORLD VALIDATED** (2026-09-04, after
+  manual re-authentication). The live Claude model generated the actual local
+  implementation through the production backend and it passed real tests — see
+  "Final authenticated Claude validation" below. The earlier expired-OAuth block is
+  retained for history: the CLI's OAuth session had been expired (`is_error: true`,
   `result: "Failed to authenticate: OAuth session expired and could not be refreshed"`)
-  and cannot be refreshed non-interactively; no `ANTHROPIC_API_KEY` fallback. The
-  live model therefore did **not** generate an implementation. This is reported
-  honestly rather than faked.
+  and could not be refreshed non-interactively; re-authenticating closed the gap.
 - **Real invocation path: VALIDATED**, and it exposed two genuine bugs (now fixed,
   commit `f7589c7`, with regression tests using the real captured output):
   1. Windows exec resolution — `subprocess(["claude", …])` exits 127 because the
@@ -671,9 +673,11 @@ version-controlled + genuinely validated. Executed on a Windows 11 machine.
      an empty/misclassified error. Now mapped to `BackendUnavailableError` with an
      actionable message. Verified against the real CLI: the default
      `ClaudeAgentRunner()` now raises a clear auth error.
-- Repair loop: **NOT live-validated with the real model** (auth-blocked). It
-  remains INTEGRATION-tested (a never-fixing solution drives the real
-  implement→test→repair loop over real pytest; see `tests/integration/test_attempts.py`).
+- Repair loop: **NOT EXERCISED with the real model** — the live model's first
+  implementation passed the tests immediately, so no repair was triggered (not
+  faked by sabotaging a correct fix). It remains INTEGRATION-tested (a never-fixing
+  solution drives the real implement→test→repair loop over real pytest; see
+  `tests/integration/test_attempts.py`).
 
 ## GitHub write path — real, against an OWNED private sandbox
 - Sandbox: **`maharshi-coding/oss-agent-sandbox`** (private, created via `gh`),
@@ -707,35 +711,107 @@ version-controlled + genuinely validated. Executed on a Windows 11 machine.
   events (`PR #2 created`, `monitoring PR`) — not fake timer activity.
 
 ## Final tests
-- **174 passing / 0 failing** (was 162). +12 regression tests across the two
-  live-validation fixes. No test patches the sandbox environment; fixes are in the
-  product code.
+- **176 passing / 0 failing** (was 174 at the start of the authenticated run). +2
+  regression tests for the two bugs the live model exposed. No test patches the
+  sandbox environment; fixes are in the product code.
 
 ## Bugs discovered during live validation
 1. Windows `claude` exec resolution (127 despite install). — fixed `f7589c7`
 2. Claude auth failure surfaced as empty/misclassified error. — fixed `f7589c7`
 3. `_extract_expected` leaked a code-comment number into the PR body. — fixed `42690e8`
 4. PR verification line counted skipped suites as executed. — fixed `42690e8`
+5. **Windows prompt delivery**: the multi-line, schema-bearing prompt was passed as
+   a positional argv element to the `claude.CMD` shim; cmd.exe truncated it at the
+   first newline, dropping the task *and* the trailing `--output-format json` flag,
+   so the model replied with prose. Now delivered on **stdin**. — fixed this run
+6. **Reasoning permission mode**: read-only agents ran under `--permission-mode plan`
+   (Claude Code's interactive plan workflow), which refuses to emit JSON headless and
+   made the model explore the OSS-Agent repo's own `CLAUDE.md`. Now `default` mode in
+   an isolated scratch dir. — fixed this run (regression: `test_prompt_is_delivered_via_stdin_not_argv`)
+7. **Planner branch desync**: `_h_planning` overwrote `snapshot.branch` with the
+   planner's suggested name after the worktree was already created on the deterministic
+   branch, so the PR-time push failed with "src refspec … does not match any". The
+   deterministic worktree branch is now authoritative. — fixed this run (regression:
+   `test_planner_branch_name_does_not_desync_worktree`)
 
 ## Final capability matrix
 - GitHub read path: **REAL-WORLD VALIDATED** (public `pallets/click` + private sandbox).
 - GitHub write path (push + PR): **REAL-WORLD VALIDATED against owned sandbox** (PR #2).
 - Local implementation / test / repair mechanics: **END-TO-END VALIDATED** (real
   clone/worktree/pytest; repair loop integration-tested).
-- Claude implementation backend: **invocation path REAL-CLI VALIDATED; live model
-  round-trip BLOCKED BY AUTHENTICATION** (expired OAuth) — not yet real-world
-  validated.
+- Claude implementation backend: **REAL-WORLD VALIDATED** — the authenticated live
+  model generated the local implementation through the production backend (sandbox
+  issue #3 → PR #4). Real repair loop: **NOT EXERCISED** (first implementation passed).
 - Safety / human review / PR preparation / persistence / visualizer: validated in
-  the real run above.
+  the real runs above.
 - Third-party OSS submission: **HUMAN-CONTROLLED BY DESIGN** (never automated).
 
 ## Final judgment
-**PARTIALLY.** OSS-Agent genuinely performs the intended workflow end-to-end
-against a real (owned) GitHub repository — discovery, analysis, scoring,
-suitability, real repository setup, context, planning, real test execution,
-review, learning, human gates, and a real human-approved PR — all cross-verified
-on GitHub. The **one** unproven link is the live Claude model generating the
-implementation, which is blocked purely by an expired local OAuth session (an
-environment/auth issue, not a code defect); the real invocation path to that model
-is validated and hardened. Re-authenticating `claude` and re-running the sandbox
-flow would close the remaining gap.
+**YES.** With `claude` re-authenticated, OSS-Agent performs the complete intended
+workflow end-to-end against a real (owned) GitHub repository with the **live Claude
+model as the implementation backend** — discovery, repository/issue analysis,
+scoring, suitability, real clone + isolated worktree, context, planning, a
+**real authenticated Claude implementation** (`base ** exp`), real `python -m pytest`
+(5/5), code/security/maintainer review, a diff-grounded learning report, the human
+approval gate, and a real human-approved PR (**#4**) — all cross-verified on GitHub.
+The previously-unproven link (the live model generating the implementation) is now
+closed. The only capability not exercised is the *real repair loop*, because the
+model's first implementation passed immediately (it was not sabotaged to force a
+failure); it remains integration-tested. See below.
+
+## Final authenticated Claude validation (2026-09-04)
+
+**Authentication:** PASS — `claude` reports "Login method: Claude Pro account" (no
+token shown). A minimal real call through the production `ClaudeAgentRunner`
+returned a parsed `IssueAnalysis` with no `BackendUnavailableError`.
+
+**Real model invoked:** YES — production backend (`OSS_AGENT_AGENT_BACKEND=claude`,
+CLI default model `claude-sonnet-5`), real subprocess, `is_error: false`.
+
+**Sandbox case:** `maharshi-coding/oss-agent-sandbox`, issue **#3** ("power()
+returns the product instead of base raised to exp"). Seeded on `main` (two commits):
+green the baseline by repairing `add()`, then add the controlled `power()` bug + two
+intentionally failing tests. Issue #1 / PR #2 left untouched.
+
+**Implementation generated by:** the **Claude production backend** (implementer agent,
+`--permission-mode acceptEdits`, inside the isolated worktree). No solution was
+injected or hand-edited.
+
+**Files changed:** `calculator.py` only — `- return base * exp` → `+ return base ** exp`
+(BUG comment removed). Scope clean: `unexpected_files=[]`, test files untouched.
+
+**Tests:** 5 passed via the real `python -m pytest` (add, add_negative, multiply,
+power, power_larger). Attempt #1 `[implement] → PASS`.
+
+**Repair loop:** NOT EXERCISED — the first implementation passed immediately (not
+sabotaged). Integration coverage retained.
+
+**Review:** code APPROVE (0 findings), security APPROVE (`secrets_detected=false`),
+maintainer APPROVE. Prompt-injection flags: none (repo + issue).
+
+**Learning report:** grounded in the real diff — "what changed: `calculator.py (+1/-2)`"
+matches Claude's diff; "how discovered" cites real symbols (`power (calculator.py:12)`).
+
+**Human gate:** `human_approved=false` through `READY_FOR_PR`; nothing pushed and no
+PR until explicit human approval was recorded and confirmed.
+
+**PR:** **#4** — `head=fix/issue-3 → base=main`, "Fixes #3", diff = only the `power()`
+one-liner. Independently verified via `gh` (remote branch present, PR metadata in the
+DB). Left OPEN, not merged.
+
+**Bugs found + fixed this run** (both surfaced only under the *real* model, invisible
+to the mock): the Windows stdin prompt-delivery / reasoning permission-mode bug, and
+the planner branch-desync that broke the PR-time push. Each has a regression test;
+suite is 174 → **176 passing / 0 failing**.
+
+**Recovery note:** the first submit failed on the branch-desync bug *after* it had
+already committed the correct fix on `fix/issue-3`. After fixing the engine and adding
+the regression test, `snapshot.branch` was corrected to the real worktree branch and
+the **production submit path** (compose → commit → push → open PR) was re-run to
+produce PR #4. The upstream Claude analysis / plan / implementation / reviews were not
+re-run (already valid and persisted).
+
+**Final capability:** Claude implementation **REAL-WORLD VALIDATED** — an authenticated
+model generated a correct local implementation through the production OSS-Agent backend,
+validated by real tests, explained by a diff-grounded learning report, and carried
+through the human-controlled contribution workflow to a real (owned-sandbox) PR.

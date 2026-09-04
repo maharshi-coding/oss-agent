@@ -211,12 +211,15 @@ breakdown):
   (cross-checked on GitHub). It is **not** run against third-party repositories by
   design: OSS-Agent will not open unsolicited AI PRs; use it on your own repos/forks.
 - **Local implementation + repair via the `claude` backend:** a real subprocess
-  integration whose invocation/parse/error handling is validated against the real
-  `claude` CLI (and hardened for Windows exec resolution + auth-error surfacing).
-  The **live model round-trip is not yet real-world validated** — during validation
-  the local CLI's OAuth session was expired; re-authenticating `claude` and re-running
-  closes this gap. Offline/tests use the deterministic `mock` runner, which delegates
-  the *implementer* step to a solution strategy.
+  integration, now **real-world validated** — with `claude` authenticated, the live
+  model generated a correct local implementation through the production backend
+  (owned sandbox issue #3 → PR #4), validated by real `pytest` (5/5) and carried
+  through the human-controlled workflow to a real PR. Prompts are delivered on stdin
+  and read-only agents run headless in an isolated scratch dir (Windows hardening
+  surfaced by this run). The **real repair loop was not exercised** — the first
+  implementation passed immediately (not sabotaged); it remains integration-tested.
+  Offline/tests use the deterministic `mock` runner, which delegates the
+  *implementer* step to a solution strategy.
 - The `api` (direct REST) GitHub backend is intentionally not implemented; use
   `gh` (recommended) or `mock`. The interface and factory are ready for it.
 - Scoring/analysis heuristics in the mock runner are deliberate, transparent
