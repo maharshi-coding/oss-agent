@@ -89,6 +89,57 @@ def test_pr_template_is_respected(engine, fake_repo):
     assert f"Closes #{ISSUE_NUMBER}" in body   # our evidence-backed summary too
 
 
+def test_planner_branch_name_does_not_desync_worktree(
+    test_settings, seeded_github, fake_repo, slugify_solution
+):
+    """Regression: a planner that proposes a semantic branch name must NOT
+    override the deterministic worktree branch. The worktree is created in
+    SELECTED on ``branch_name_for(...)`` and that is the only branch that exists
+    in git; adopting the plan's name desynchronizes ``snapshot.branch`` from the
+    real branch and breaks the push at PR time ("src refspec ... does not match
+    any"). Surfaced by live Claude validation — the mock planner returns the
+    deterministic name, so this was invisible before.
+    """
+    from oss_agent.agents.mock_runner import MockAgentRunner
+    from oss_agent.config.profile import DEFAULT_PROFILE
+    from oss_agent.git.naming import branch_name_for
+    from oss_agent.orchestrator.builder import build_engine
+    from oss_agent.orchestrator.repo_provider import MappedRepoProvider
+    from oss_agent.persistence.repository import InMemoryWorkflowRepository
+
+    class SemanticBranchRunner(MockAgentRunner):
+        def plan(self, ctx):
+            p = super().plan(ctx)
+            return p.model_copy(update={"branch_name": "feature/totally-different-name"})
+
+    engine = build_engine(
+        test_settings,
+        repository=InMemoryWorkflowRepository(),
+        github=seeded_github,
+        runner=SemanticBranchRunner(solution=slugify_solution),
+        repo_provider=MappedRepoProvider({FULL_NAME: str(fake_repo.path)}),
+        profile=DEFAULT_PROFILE,
+    )
+    app = Application(engine)
+    engine.create_workflow(workflow_id="branch-1", repository_full_name=FULL_NAME, issue_number=ISSUE_NUMBER)
+    engine.run("branch-1")
+    snap = engine.get("branch-1")
+
+    expected = branch_name_for(ISSUE_NUMBER)  # fix/issue-101
+    # snapshot.branch stays the deterministic worktree branch, not the plan's name.
+    assert snap.branch == expected
+    assert snap.branch != "feature/totally-different-name"
+    # the plan's suggestion is retained for reference only.
+    assert snap.plan.branch_name == "feature/totally-different-name"
+    # the branch actually exists in the worktree (so a real push would succeed).
+    assert engine.git.current_branch(snap.worktree_path) == expected
+    # end-to-end: the gated submission still succeeds and targets the real branch.
+    app.prepare_pr("branch-1")
+    app.approve("branch-1")
+    submitted = app.submit("branch-1", confirm=True)
+    assert submitted.pull_request.created is True
+
+
 def test_final_conflict_check_blocks_submission(engine, seeded_github):
     app = Application(engine)
     _ready(engine, "prep-6")

@@ -301,7 +301,16 @@ class WorkflowEngine:
         ctx = self._context(s)
         plan = self._run_agent(s, AgentName.PLANNER, lambda: self.runner.plan(ctx), "ImplementationPlan")
         s.plan = plan
-        s.branch = plan.branch_name or s.branch
+        # Do NOT adopt plan.branch_name as s.branch. The worktree was already
+        # created in SELECTED on the deterministic branch (branch_name_for), and
+        # that is the only branch that actually exists in git. A real planner
+        # (Claude) often suggests a semantic name (e.g. "fix/power-function-
+        # exponentiation"); adopting it here desynchronizes the snapshot from the
+        # real worktree branch and breaks the push at PR time ("src refspec ...
+        # does not match any"), plus the duplicate/conflict checks that key off
+        # the deterministic name. The suggestion is retained on s.plan.branch_name
+        # for reference only. (Surfaced by live validation; the mock planner never
+        # returned a divergent name so this was invisible before.)
         return S.IMPLEMENTATION
 
     def _h_implementation(self, s: WorkflowSnapshot) -> S:
