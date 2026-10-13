@@ -221,10 +221,14 @@ class GitService:
         return self._git(args, cwd=repo)
 
     # -- worktrees ------------------------------------------------------------
+    def assert_worktree_branch_allowed(self, branch: str) -> None:
+        """Apply the configured branch policy before creating or reusing worktrees."""
+        git_safety.assess_checkout_target(branch, protected=self._protected).raise_if_blocked()
+
     def add_worktree(
         self, repo: str | Path, path: str | Path, branch: str, *, base: Optional[str] = None
     ) -> None:
-        git_safety.assess_checkout_target(branch, protected=self._protected).raise_if_blocked()
+        self.assert_worktree_branch_allowed(branch)
         args = ["worktree", "add", "-b", branch, str(path)]
         if base:
             args.append(base)
@@ -233,7 +237,7 @@ class GitService:
     def add_worktree_existing_branch(
         self, repo: str | Path, path: str | Path, branch: str
     ) -> None:
-        git_safety.assess_checkout_target(branch, protected=self._protected).raise_if_blocked()
+        self.assert_worktree_branch_allowed(branch)
         self._git(["worktree", "add", str(path), branch], cwd=repo)
 
     def remove_worktree(self, repo: str | Path, path: str | Path, *, force: bool = False) -> None:

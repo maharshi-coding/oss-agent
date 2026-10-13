@@ -28,7 +28,7 @@ config/scoring.yaml
 *.db
 *.sqlite3
 workflows/*.json
-worktrees/
+/worktrees/
 !workflows/.gitkeep
 
 # OS / editor
