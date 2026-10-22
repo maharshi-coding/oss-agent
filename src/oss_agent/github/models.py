@@ -30,6 +30,11 @@ class PullRequest(_Base):
     merged: bool = False
     url: Optional[str] = None
     author: Optional[str] = None
+    repository_full_name: Optional[str] = None
+    head_sha: Optional[str] = None
+    base_sha: Optional[str] = None
+    head_repository_full_name: Optional[str] = None
+    head_repository_owner: Optional[str] = None
     created_at: Optional[datetime] = None
     labels: list[str] = Field(default_factory=list)
 

@@ -34,6 +34,7 @@ def test_learning_report_is_grounded_in_the_real_diff(engine):
     assert any("+"  in c and "-" in c for c in report.what_changed)  # numstat present
     assert any("passed" in t for t in report.tests_that_prove_it)
     assert "pass" in report.why_the_fix_works.lower()
+    assert "Captured counts show 2 passing test cases." in report.why_the_fix_works
     assert report.maintainer_questions  # teaches the developer what to defend
 
     # Persisted on the snapshot and renderable.

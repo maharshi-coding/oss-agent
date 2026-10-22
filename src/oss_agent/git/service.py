@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Optional, Sequence
 
 from oss_agent.execution.runner import CommandResult, CommandRunner
@@ -80,6 +81,33 @@ class GitService:
 
     def head_sha(self, repo: str | Path) -> str:
         return self._git(["rev-parse", "HEAD"], cwd=repo).stdout.strip()
+
+    def resolve_ref(self, repo: str | Path, ref: str) -> str:
+        return self._git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo).stdout.strip()
+
+    def merge_base(self, repo: str | Path, first: str, second: str) -> str:
+        return self._git(["merge-base", first, second], cwd=repo).stdout.strip()
+
+    def fetch_ref(self, repo: str | Path, remote: str, ref: str) -> str:
+        """Fetch an explicit ref without changing any checkout or local branch."""
+        self._git(["fetch", "--no-tags", "--", remote, ref], cwd=repo)
+        return self.resolve_ref(repo, "FETCH_HEAD")
+
+    def fetch_pull_request(
+        self, repo: str | Path, full_name: str, number: int, expected_sha: str,
+    ) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name) or number < 1:
+            raise ValueError("invalid pull request fetch target")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha):
+            raise ValueError("invalid expected pull request SHA")
+        sha = self.fetch_ref(repo, f"https://github.com/{full_name}.git", f"refs/pull/{number}/head")
+        if sha != expected_sha:
+            raise ValueError("pull request head changed while fetching; create a new workflow")
+        return sha
+
+    def commit_identity(self, repo: str | Path) -> tuple[str, str, str, str]:
+        values = self._git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"], cwd=repo)
+        return tuple(values.stdout.strip().split("\0"))  # type: ignore[return-value]
 
     def list_branches(self, repo: str | Path) -> list[str]:
         out = self._git(["branch", "--format=%(refname:short)"], cwd=repo).stdout
@@ -219,6 +247,25 @@ class GitService:
         if force:
             args.append("--force-with-lease")
         return self._git(args, cwd=repo)
+
+    def push_to_owned_branch(
+        self, repo: str | Path, *, owner: str, repository: str, branch: str,
+        expected_sha: str,
+    ) -> CommandResult:
+        """Fast-forward only to an exact, previously verified owned fork branch."""
+        git_safety.assess_push(branch, protected=self._protected).raise_if_blocked()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repository):
+            raise ValueError("invalid owned fork target")
+        self._git(["check-ref-format", f"refs/heads/{branch}"], cwd=repo)
+        remote = f"https://github.com/{owner}/{repository}.git"
+        current = self._git(["ls-remote", "--heads", remote, f"refs/heads/{branch}"], cwd=repo).stdout.split()
+        if not current or current[0] != expected_sha:
+            raise ValueError("fork branch changed before push; refusing to overwrite work")
+        self._git(["merge-base", "--is-ancestor", expected_sha, "HEAD"], cwd=repo)
+        return self._git([
+            "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+            "push", "--", remote, f"HEAD:refs/heads/{branch}",
+        ], cwd=repo)
 
     # -- worktrees ------------------------------------------------------------
     def assert_worktree_branch_allowed(self, branch: str) -> None:

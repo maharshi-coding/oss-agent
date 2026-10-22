@@ -41,6 +41,7 @@ class InMemoryGitHubClient(GitHubClient):
         self._ci: dict[tuple[str, str], CIStatus] = {}
         self._pr_counter: dict[str, int] = {}
         self._linked_prs: set[tuple[str, int]] = set()
+        self.login = "oss-agent[bot]"
 
     # -- seeding helpers ------------------------------------------------------
     def add_repository(self, repo: Repository) -> "InMemoryGitHubClient":
@@ -70,6 +71,9 @@ class InMemoryGitHubClient(GitHubClient):
         self._issue_comments.setdefault((full_name, number), []).append(comment)
 
     # -- read -----------------------------------------------------------------
+    def authenticated_login(self) -> str:
+        return self.login
+
     def search_repositories(self, query: str, *, limit: int = 20) -> list[Repository]:
         q = query.lower()
         results = [
@@ -178,6 +182,16 @@ class InMemoryGitHubClient(GitHubClient):
             if pr.number == number:
                 return pr
         raise GitHubError(f"PR not found: {full_name}#{number}")
+
+    def get_pull_request_diff(self, full_name: str, number: int) -> str:
+        raise GitHubError("pull request diff not configured in the in-memory adapter")
+
+    def update_pull_request(
+        self, full_name: str, number: int, *, title: str, body: str,
+    ) -> PullRequest:
+        pr = self.get_pull_request(full_name, number)
+        pr.title, pr.body = title, body
+        return pr
 
     def find_pull_request_by_head(self, full_name: str, head: str) -> Optional[PullRequest]:
         for pr in self._prs.get(full_name, []):

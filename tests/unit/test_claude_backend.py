@@ -28,6 +28,15 @@ from oss_agent.execution.runner import CommandResult
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _offline_research(monkeypatch):
+    # These tests cover prompt construction, not the GitHub research collector.
+    monkeypatch.setattr(
+        "oss_agent.agents.claude_runner.collect_research",
+        lambda ctx: "CAPTURED_RESEARCH_MARKER",
+    )
+
+
 @dataclass
 class FakeRunner:
     """Stands in for CommandRunner; records calls and returns a canned result."""
@@ -93,6 +102,47 @@ def test_extracts_json_from_fenced_block():
     runner, _ = _runner_with(_result(stdout=fenced))
     analysis = runner.analyze_issue(_issue_ctx())
     assert analysis.problem_statement == "trailing hyphen"
+
+
+@pytest.mark.parametrize("problem", [
+    "The startup branch ends with an opening brace: if err != nil {",
+    "A diagnostic includes a closing brace: }",
+    'Quoted code and escapes: fmt.Printf("{\\\\%q", "value\\\"")',
+    'A nested JSON example is text: {"outer": {"value": "}"}}',
+])
+@pytest.mark.parametrize("wrapper", ["plain", "envelope", "fenced", "prose"])
+def test_json_strings_preserve_braces_and_escapes(problem, wrapper):
+    payload = {**_ISSUE_JSON, "problem_statement": problem}
+    response = json.dumps(payload)
+    if wrapper == "envelope":
+        response = json.dumps({"result": response})
+    elif wrapper == "fenced":
+        response = "Response:\n```json\n" + response + "\n```\nDone."
+    elif wrapper == "prose":
+        response = "Response follows:\n" + response + "\nDone."
+    runner, _ = _runner_with(_result(stdout=response))
+    analysis = runner.analyze_issue(_issue_ctx())
+    assert analysis.problem_statement == problem
+
+
+def test_complete_json_object_takes_precedence_over_fence_text_in_a_string():
+    payload = {"description": 'Code sample: ```json\n{"example": true}\n```'}
+    assert ClaudeAgentRunner._extract_json_object(json.dumps(payload)) == payload
+
+
+def test_json_fence_takes_precedence_over_a_prose_example():
+    response = 'Example: {"example": true}\n```json\n' + json.dumps(_ISSUE_JSON) + '\n```'
+    assert ClaudeAgentRunner._extract_json_object(response) == _ISSUE_JSON
+
+
+def test_extracts_object_after_an_unmatched_prose_brace():
+    response = 'The example uses { in prose.\n' + json.dumps(_ISSUE_JSON)
+    assert ClaudeAgentRunner._extract_json_object(response) == _ISSUE_JSON
+
+
+@pytest.mark.parametrize("response", ["", "No JSON here.", '{"key": invalid}', '[{"key": "value"}]'])
+def test_extract_json_object_rejects_missing_malformed_or_nonobject_json(response):
+    assert ClaudeAgentRunner._extract_json_object(response) is None
 
 
 def test_missing_cli_raises_backend_unavailable():
@@ -230,3 +280,69 @@ def test_prompt_is_delivered_via_stdin_not_argv():
     assert "--output-format" in args and "json" in args
     assert "default" in args  # read-only analysis runs in default (no-edit) mode
     assert "plan" not in args  # NOT interactive plan mode (it refuses headless)
+
+
+@pytest.mark.parametrize("method,response", [
+    ("analyze_repository", {"repository": {"owner": "octo", "name": "util"}}),
+    ("analyze_issue", _ISSUE_JSON),
+    ("plan", {
+        "repository_full_name": "octo/util", "issue_number": 101,
+        "objective": "Strip trailing hyphens", "branch_name": "fix/issue-101",
+    }),
+    ("implement", {}),
+    ("debug", {}),
+    ("review_code", {"verdict": "APPROVE"}),
+    ("review_security", {"verdict": "APPROVE"}),
+    ("maintainer_review", {"verdict": "APPROVE"}),
+    ("compose_pull_request", {
+        "repository_full_name": "octo/util", "issue_number": 101,
+        "branch": "fix/issue-101", "title": "Fix trailing hyphen", "body": "Measured fix.",
+    }),
+])
+def test_user_requirements_reach_every_contribution_agent(method, response, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from oss_agent.domain.models import ImplementationPlan, RepositoryContext, TestResult
+    from oss_agent.worktrees.manager import WorktreeHandle
+
+    ctx = _issue_ctx()
+    instructions = "Verify portrait and landscape; never invent visual validation.\nKeep the PR focused."
+    ctx.snapshot.user_instructions = instructions
+    ctx.snapshot.plan = ImplementationPlan(
+        repository_full_name="octo/util", issue_number=101,
+        objective="Strip trailing hyphens", branch_name="fix/issue-101",
+    )
+    ctx.snapshot.repository_context = RepositoryContext(
+        repository_full_name="octo/util", likely_files=["SOURCE_CONTEXT_MARKER.py"],
+    )
+    ctx.github = Mock()
+    ctx.github.list_files.return_value = [SimpleNamespace(path="README.md")]
+    ctx.github.get_file.return_value = "REPOSITORY_CONTENT_MARKER"
+    ctx.git = Mock()
+    ctx.git.diff.return_value = "DIFF_CONTENT_MARKER"
+    ctx.git.diff_name_status.return_value = []
+    ctx.worktree = WorktreeHandle("t", "octo/util", str(tmp_path), "fix/issue-101", False)
+    runner, fake = _runner_with(_result(stdout=json.dumps(response)))
+
+    if method == "debug":
+        runner.debug(ctx, TestResult(repository_full_name="octo/util"))
+    else:
+        getattr(runner, method)(ctx)
+
+    prompt = fake.calls[0]["input_text"]
+    assert f"# User task requirements\n{instructions}" in prompt
+    # Human requirements are not mislabeled as issue/repository instructions.
+    assert prompt.index(instructions) < prompt.index("<<<BEGIN UNTRUSTED_")
+    untrusted = prompt.split("<<<BEGIN UNTRUSTED_", 1)[1].split("<<<END", 1)[0]
+    assert instructions not in untrusted
+    if method in ("analyze_repository", "analyze_issue", "plan"):
+        assert "CAPTURED_RESEARCH_MARKER" in untrusted
+    if method in ("plan", "implement", "debug"):
+        assert "SOURCE_CONTEXT_MARKER.py" in untrusted
+
+
+def test_no_user_requirements_does_not_add_a_task_section():
+    runner, fake = _runner_with(_result(stdout=json.dumps(_ISSUE_JSON)))
+    runner.analyze_issue(_issue_ctx())
+    assert "# User task requirements" not in fake.calls[0]["input_text"]

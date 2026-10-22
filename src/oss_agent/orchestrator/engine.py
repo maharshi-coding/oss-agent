@@ -9,6 +9,8 @@ only the engine applies a :class:`StateMachine`-validated transition.
 from __future__ import annotations
 
 import uuid
+import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,6 +31,7 @@ from oss_agent.domain.models import (
     AgentExecution,
     ImplementationAttempt,
     Issue,
+    PullRequestContinuation,
     Repository,
     TestResult,
     WorkflowEvent,
@@ -104,6 +107,9 @@ class WorkflowEngine:
         workflow_id: Optional[str] = None,
         repository_full_name: Optional[str] = None,
         issue_number: Optional[int] = None,
+        user_instructions: str = "",
+        related_pr_numbers: Optional[list[int]] = None,
+        existing_pr_number: Optional[int] = None,
     ) -> WorkflowSnapshot:
         wid = workflow_id or self._new_id()
         if self.repo.exists(wid):
@@ -113,6 +119,9 @@ class WorkflowEngine:
             state=S.DISCOVERY,
             repository_full_name=repository_full_name,
             issue_number=issue_number,
+            user_instructions=user_instructions,
+            related_pr_numbers=list(related_pr_numbers or []),
+            existing_pr_number=existing_pr_number,
         )
         self._emit(snapshot, EventType.WORKFLOW_CREATED, action="workflow created")
         self.repo.save(snapshot)
@@ -212,6 +221,12 @@ class WorkflowEngine:
             s.repository, s.issue = best.repository, best.issue
             s.repository_full_name = best.repository.full_name
             s.issue_number = best.issue.number
+        if s.existing_pr_number:
+            s.continuation = self._verify_continuation_target(s)
+            if s.existing_pr_number not in s.related_pr_numbers:
+                s.related_pr_numbers.append(s.existing_pr_number)
+            self._emit(s, EventType.NOTE, action=f"adopting owned existing PR #{s.existing_pr_number}",
+                       detail=s.continuation.model_dump())
         dup = self._duplicate_reason(s)
         if dup:
             self._emit(s, EventType.SAFETY_BLOCKED, action=f"duplicate: {dup}")
@@ -254,8 +269,15 @@ class WorkflowEngine:
         # here at all (existing PRs, assignment, maintainer intent, staleness,
         # and whether a comment says someone is already working on it). This is
         # the anti-"PR spam" guard and runs even when the technical score is high.
+        suitability_issue = s.issue
+        if s.continuation and s.issue:
+            # The adopted PR is the review target, not a second contribution.
+            # All OTHER linked work and the live agent's duplicate risk remain.
+            suitability_issue = s.issue.model_copy(update={
+                "linked_pr_numbers": [n for n in s.issue.linked_pr_numbers if n != s.continuation.number],
+            })
         assessment = self.suitability.assess(
-            s.issue_analysis, s.repository_report, self.profile, issue=s.issue,
+            s.issue_analysis, s.repository_report, self.profile, issue=suitability_issue,
             comment_bodies=self._issue_comment_bodies(s),
         )
         s.suitability = assessment
@@ -278,7 +300,27 @@ class WorkflowEngine:
         default_branch = s.repository.default_branch if s.repository else "main"
         base_repo = self.repo_provider.ensure_local(s.repository_full_name, default_branch=default_branch)
         branch = branch_name_for(s.issue_number, s.issue_analysis.contribution_type)
-        handle = self.worktrees.create(base_repo, s.id, branch, base=default_branch)
+        base = default_branch
+        if s.continuation:
+            current = self._verify_continuation_target(s)
+            if current != s.continuation:
+                raise OrchestrationError("adopted PR metadata changed; create a new workflow")
+            base = self.git.fetch_pull_request(
+                base_repo, s.repository_full_name, current.number, current.head_sha,
+            )
+            # Fetch the exact upstream base for full-delta review, independently
+            # of the fork and without switching the user's checkout.
+            fetched_base = self.git.fetch_ref(
+                base_repo, f"https://github.com/{s.repository_full_name}.git",
+                f"refs/heads/{current.base_branch}",
+            )
+            if fetched_base != current.base_sha:
+                raise OrchestrationError("upstream base changed while fetching; create a new workflow")
+            s.review_base_sha = self.git.merge_base(base_repo, current.base_sha, current.head_sha)
+            branch = f"continue/pr-{current.number}/{s.id}"
+        handle = self.worktrees.create(base_repo, s.id, branch, base=base)
+        if s.continuation and self.git.head_sha(handle.path) != s.continuation.head_sha:
+            raise OrchestrationError("existing continuation worktree does not match adopted PR head")
         s.worktree_path = handle.path
         s.branch = handle.branch
         self._emit(s, EventType.WORKTREE_CREATED, action=f"worktree at {handle.path}",
@@ -329,6 +371,8 @@ class WorkflowEngine:
         self._emit(s, EventType.COMMAND_EXECUTED, action=result.summary,
                    detail={"passed": result.passed})
         if result.passed:
+            if s.continuation:
+                s.validated_diff_digest = self._continuation_diff_digest(s)
             return S.CODE_REVIEW
         if s.debug_iteration >= self.settings.max_debug_iterations:
             s.last_error = f"tests still failing after {s.debug_iteration} debug iteration(s)"
@@ -395,8 +439,14 @@ class WorkflowEngine:
             "PullRequestResult",
         )
         pr_desc.created = False
-        pr_desc.number = None
-        pr_desc.url = None
+        pr_desc.number = s.continuation.number if s.continuation else None
+        pr_desc.url = s.continuation.url if s.continuation else None
+        if s.continuation:
+            pr_desc.draft = s.continuation.draft
+            pr_desc.branch = s.continuation.head_branch
+            # A regenerated description needs a fresh human decision too.
+            s.human_approved = False
+            s.human_decision_note = None
         s.pull_request = pr_desc
         self._emit(s, EventType.NOTE, action="PR prepared (not submitted)")
         self.repo.save(s)
@@ -421,12 +471,24 @@ class WorkflowEngine:
             raise HumanApprovalRequired(
                 "submission requires explicit confirmation (not defaulted to yes)"
             )
+        self._assert_gates(s)
         conflict = self._submission_conflict(s)
         if conflict:
             self._emit(s, EventType.SAFETY_BLOCKED, action=f"submission blocked: {conflict}")
             s.last_error = f"submission blocked: {conflict}"
             self.repo.save(s)
             raise SubmissionBlocked(conflict)
+        if s.continuation:
+            try:
+                s.pull_request = self._update_existing_pull_request(s)
+                self._transition(s, S.PR_CREATED, action=f"PR #{s.continuation.number} updated")
+                self._emit(s, EventType.PR_CREATED, action=f"existing PR #{s.continuation.number} updated",
+                           detail={"url": s.continuation.url, "existing": True})
+                self._transition(s, S.PR_MONITORING, action="monitoring existing PR")
+            except Exception as exc:
+                self._fail(s, f"existing PR update failed: {exc}")
+            self.repo.save(s)
+            return s
         # All human gates passed → perform the actual push + PR creation.
         return self.create_pr(workflow_id, draft=draft)
 
@@ -435,6 +497,8 @@ class WorkflowEngine:
         may have changed while the developer reviewed the contribution."""
         full = s.repository_full_name or ""
         num = s.issue_number or 0
+        if s.continuation:
+            return self._continuation_conflict(s)
         try:
             issue = self.github.get_issue(full, num)
             if issue.state and issue.state.lower() != "open":
@@ -468,6 +532,8 @@ class WorkflowEngine:
     # -- PR creation (gated, explicit) ---------------------------------------
     def create_pr(self, workflow_id: str, *, draft: bool = False) -> WorkflowSnapshot:
         s = self.get(workflow_id)
+        if s.continuation:
+            raise HumanApprovalRequired("existing PR continuations require prepare-pr, approve, and submit --confirm")
         if s.state is not S.READY_FOR_PR:
             raise OrchestrationError(f"workflow must be READY_FOR_PR to open a PR (is {s.state.value})")
         self._assert_gates(s)
@@ -493,8 +559,13 @@ class WorkflowEngine:
             raise OrchestrationError("gate failed: maintainer review not approved")
         if s.implementation and s.implementation.unexpected_files:
             raise OrchestrationError("gate failed: change is out of scope")
+        if s.continuation and (
+            not s.validated_diff_digest or self._continuation_diff_digest(s) != s.validated_diff_digest
+        ):
+            raise OrchestrationError("gate failed: continuation diff changed since passing tests")
 
     def _open_pull_request(self, s: WorkflowSnapshot, *, draft: bool):
+        self._assert_github_account()
         ctx = self._context(s)
         pr_desc = self._run_agent(s, AgentName.PR_MANAGER, lambda: self.runner.compose_pull_request(ctx), "PullRequestResult")
         wt = s.worktree_path
@@ -503,7 +574,12 @@ class WorkflowEngine:
         if not self.git.is_clean(wt):
             self.git.add_all(wt)
         commit_msg = f"{pr_desc.title}\n\nCloses #{s.issue_number}"
-        self.git.commit(wt, commit_msg, author_name="oss-agent", author_email="oss-agent@example.invalid")
+        self.git.commit(
+            wt, commit_msg,
+            author_name=self.settings.git_author_name,
+            author_email=self.settings.git_author_email,
+        )
+        self._assert_commit_identity(wt)
         # Push only when a remote is configured (offline/mock has none).
         if self.git.has_remote(wt, "origin"):
             self.git.push(wt, s.branch)
@@ -522,6 +598,211 @@ class WorkflowEngine:
         pr_desc.url = pr.url
         pr_desc.created = True
         return pr_desc
+
+    def _assert_github_account(self, *, required: bool = False) -> str:
+        expected = self.settings.github_login
+        if required and not expected:
+            raise OrchestrationError("existing PR continuation requires OSS_AGENT_GITHUB_LOGIN")
+        if not expected:
+            return ""
+        actual = self.github.authenticated_login()
+        if actual.lower() != expected.lower():
+            raise OrchestrationError(f"authenticated GitHub account is {actual}, expected {expected}")
+        return actual
+
+    def _verify_continuation_target(self, s: WorkflowSnapshot) -> PullRequestContinuation:
+        login = self._assert_github_account(required=True)
+        full = s.repository_full_name or ""
+        pr = self.github.get_pull_request(full, s.existing_pr_number or 0)
+        if pr.number != s.existing_pr_number:
+            raise OrchestrationError("GitHub returned a different PR than the requested continuation")
+        if pr.state.lower() != "open" or pr.merged:
+            raise OrchestrationError("adopted PR must still be open and unmerged")
+        if not pr.author or pr.author.lower() != login.lower():
+            raise OrchestrationError("adopted PR author is not the authenticated contributor")
+        if pr.repository_full_name != full or pr.url != f"https://github.com/{full}/pull/{pr.number}":
+            raise OrchestrationError("adopted PR does not belong to the requested upstream repository")
+        if not pr.head_repository_owner or pr.head_repository_owner.lower() != login.lower():
+            raise OrchestrationError("adopted PR head fork is not owned by the authenticated contributor")
+        fork = pr.head_repository_full_name or ""
+        if fork.lower() != f"{login}/{full.split('/')[-1]}".lower() or fork.lower() == full.lower():
+            raise OrchestrationError("adopted PR must target a branch in the contributor's matching fork")
+        if not re.fullmatch(r"[0-9a-f]{40}", pr.head_sha or "") or not re.fullmatch(r"[0-9a-f]{40}", pr.base_sha or ""):
+            raise OrchestrationError("adopted PR is missing verified head/base commit identities")
+        self.git.assert_worktree_branch_allowed(pr.head)
+        return PullRequestContinuation(
+            number=pr.number, repository_full_name=full, author=login,
+            head_sha=pr.head_sha, base_sha=pr.base_sha,
+            head_repository_full_name=fork, head_repository_owner=pr.head_repository_owner,
+            head_branch=pr.head, base_branch=pr.base, draft=pr.draft, url=pr.url,
+        )
+
+    def _continuation_diff_digest(self, s: WorkflowSnapshot) -> str:
+        assert s.continuation and s.worktree_path
+        # Include untracked content by requiring every implementation stage to
+        # stage its output before testing; refuse later untracked additions too.
+        status = self.git.status_porcelain(s.worktree_path)
+        if any(line.startswith("??") for line in status.splitlines()):
+            raise OrchestrationError("continuation contains untracked files outside the validated diff")
+        delta = self.git.diff(s.worktree_path, base=s.review_base_sha or s.continuation.base_sha)
+        return hashlib.sha256(delta.encode()).hexdigest()
+
+    @staticmethod
+    def _diff_paths(diff: str) -> set[str]:
+        return set(re.findall(r"^(?:\+\+\+ b/|--- a/)(.+)$", diff, re.MULTILINE))
+
+    @staticmethod
+    def _shared_scaffolding_matches(own_diff: str, other_diff: str, path: str) -> bool:
+        """Identical additive test setup is compatible; production overlap is not.
+
+        This deliberately narrow allowance is derived from the actual changes,
+        never from a PR number or an agent's assurance of compatibility.
+        """
+        if path != "android/build.gradle" and not path.startswith(".github/workflows/"):
+            return False
+
+        def edits(diff: str) -> list[tuple[int, str]]:
+            selected = False
+            lines = []
+            old_line = 0
+            for line in diff.splitlines():
+                if line.startswith("diff --git "):
+                    selected = line == f"diff --git a/{path} b/{path}"
+                elif selected:
+                    hunk = re.match(r"@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@", line)
+                    if hunk:
+                        old_line = int(hunk.group(1))
+                    elif line.startswith(("+++", "---")):
+                        continue
+                    elif line.startswith("+"):
+                        if line[1:].strip():
+                            lines.append((old_line, line))
+                    elif line.startswith("-"):
+                        lines.append((old_line, line))
+                        old_line += 1
+                    elif line.startswith(" "):
+                        old_line += 1
+            return lines
+
+        own, other = edits(own_diff), edits(other_diff)
+        if not own or not other:
+            return False
+        if own == other:
+            return True
+        if path != "android/build.gradle":
+            return False
+        # Two PRs may add the exact same unit-test dependencies while one also
+        # adds instrumentation-only dependencies. Permit that strict superset
+        # only when every line is recognized additive test setup at the same
+        # original source anchor. Any removal, setting change, production
+        # dependency, or contradictory dependency version stays blocked.
+        dependency = re.compile(
+            r"(testImplementation|androidTestImplementation) ['\"]"
+            r"([A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+):([A-Za-z0-9_.+\-]+)['\"]"
+        )
+        for changes in (own, other):
+            seen = {}
+            for _, line in changes:
+                if not line.startswith("+"):
+                    return False
+                value = line[1:].strip()
+                match = dependency.fullmatch(value)
+                if match:
+                    key, version = (match.group(1), match.group(2)), match.group(3)
+                elif value == "testOptions { unitTests.includeAndroidResources = true }":
+                    key, version = ("testOptions", "resources"), "true"
+                elif re.fullmatch(r"testInstrumentationRunner ['\"][A-Za-z0-9_.]+['\"]", value):
+                    key, version = ("testInstrumentationRunner", "runner"), value
+                else:
+                    return False
+                if key in seen and seen[key] != version:
+                    return False
+                seen[key] = version
+        return set(own).issubset(other) or set(other).issubset(own)
+
+    def _continuation_conflict(self, s: WorkflowSnapshot) -> Optional[str]:
+        assert s.continuation and s.worktree_path
+        try:
+            current = self._verify_continuation_target(s)
+            if current != s.continuation:
+                return "adopted PR head, base, ownership, or draft state changed; rerun review"
+            issue = self.github.get_issue(s.repository_full_name or "", s.issue_number or 0)
+            if issue.state.lower() != "open" or issue.assignees:
+                return "issue is closed or assigned; contribution needs reassessment"
+            if self.github.get_repository(s.repository_full_name or "").archived:
+                return "repository is now archived"
+            own_diff = self.git.diff(s.worktree_path, base=s.review_base_sha or current.base_sha)
+            own_paths = self._diff_paths(own_diff)
+            issue_reference = re.compile(rf"(?<!\d)#{s.issue_number}(?!\d)|/issues/{s.issue_number}(?!\d)")
+            for pr in self.github.list_pull_requests(s.repository_full_name or ""):
+                if pr.number == current.number:
+                    continue
+                relevant = pr.number in issue.linked_pr_numbers or issue_reference.search(pr.title + "\n" + pr.body)
+                if relevant:
+                    diff = self.github.get_pull_request_diff(s.repository_full_name or "", pr.number)
+                    paths = self._diff_paths(diff)
+                    if not paths:
+                        return f"cannot verify competing PR #{pr.number} scope"
+                    overlap = {
+                        path for path in own_paths & paths
+                        if not self._shared_scaffolding_matches(own_diff, diff, path)
+                    }
+                    if overlap:
+                        return f"competing PR #{pr.number} overlaps contribution files: {', '.join(sorted(overlap))}"
+            return None
+        except Exception as exc:
+            return f"could not verify continuation conflicts: {exc}"
+
+    def _assert_commit_identity(self, worktree: str) -> None:
+        expected = (self.settings.git_author_name, self.settings.git_author_email) * 2
+        if self.git.commit_identity(worktree) != expected:
+            raise OrchestrationError("actual contribution commit author/committer does not match configured identity")
+
+    def _update_existing_pull_request(self, s: WorkflowSnapshot):
+        assert s.continuation and s.worktree_path and s.pull_request
+        target, wt, description = s.continuation, s.worktree_path, s.pull_request
+        self._assert_github_account(required=True)
+        if self._verify_continuation_target(s) != target:
+            raise SubmissionBlocked("adopted PR changed immediately before publication")
+        if self.git.head_sha(wt) != target.head_sha:
+            raise SubmissionBlocked("continuation HEAD changed outside the controlled commit path")
+        full = re.escape(target.repository_full_name)
+        issue_ref = rf"(?:(?:{full})?#{s.issue_number}|https://github\.com/{full}/issues/{s.issue_number})\b"
+        if re.search(
+            rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+{issue_ref}",
+            description.title + "\n" + description.body, re.IGNORECASE,
+        ):
+            raise SubmissionBlocked("continuation description must reference the issue without closing it")
+        self.git.add_all(wt)
+        if self.git.staged_diff(wt).strip():
+            self.git.commit(
+                wt, f"{description.title}\n\nRelated to #{s.issue_number}; continues PR #{target.number}",
+                author_name=self.settings.git_author_name, author_email=self.settings.git_author_email,
+            )
+            self._assert_commit_identity(wt)
+            self.git.push_to_owned_branch(
+                wt, owner=target.head_repository_owner,
+                repository=target.head_repository_full_name.split("/", 1)[1],
+                branch=target.head_branch, expected_sha=target.head_sha,
+            )
+        # No incremental changes means no empty commit and no push. The fully
+        # reviewed existing PR can still receive its new evidence in the body.
+        self._assert_github_account(required=True)
+        current = self._verify_continuation_target(s)
+        # GitHub's PR head update can lag the successful fast-forward briefly.
+        # Both the original verified SHA and our exact new commit are safe;
+        # any other head or changed target must be reviewed again.
+        if current.head_sha not in {target.head_sha, self.git.head_sha(wt)} or current.model_copy(
+            update={"head_sha": target.head_sha},
+        ) != target:
+            raise SubmissionBlocked("adopted PR target changed before description update")
+        pr = self.github.update_pull_request(
+            target.repository_full_name, target.number, title=description.title, body=description.body,
+        )
+        description.number, description.url = pr.number, pr.url
+        description.branch = target.head_branch
+        description.draft, description.created = target.draft, True
+        return description
 
     # -- helpers --------------------------------------------------------------
     def _context(self, s: WorkflowSnapshot) -> AgentContext:
@@ -601,7 +882,10 @@ class WorkflowEngine:
             return []
 
     def _duplicate_reason(self, s: WorkflowSnapshot) -> Optional[str]:
-        # Any other active workflow targeting the same issue is a duplicate.
+        # Other active work on this issue is a duplicate. Monitoring the exact
+        # published PR being explicitly adopted is historical evidence, though,
+        # not a competing implementation. Discovery verifies that target live
+        # before this check; an unpublished or different PR remains blocked.
         for other in self.repo.list():
             if (
                 other.id != s.id
@@ -609,12 +893,26 @@ class WorkflowEngine:
                 and other.issue_number == s.issue_number
                 and not StateMachine.is_terminal(other.state)
             ):
+                published = other.pull_request
+                target = s.continuation
+                if (
+                    target
+                    and s.existing_pr_number == target.number
+                    and other.state is S.PR_MONITORING
+                    and published is not None
+                    and published.created
+                    and published.repository_full_name == target.repository_full_name == s.repository_full_name
+                    and published.issue_number == s.issue_number
+                    and published.number == target.number
+                    and published.url == target.url == f"https://github.com/{s.repository_full_name}/pull/{target.number}"
+                ):
+                    continue
                 return f"active workflow {other.id} already targets this issue"
         # An existing PR for the deterministic branch.
         try:
             head = branch_name_for(s.issue_number or 0)
             pr = self.github.find_pull_request_by_head(s.repository_full_name or "", head)
-            if pr is not None:
+            if pr is not None and not (s.continuation and pr.number == s.continuation.number):
                 return f"PR #{pr.number} already exists for branch {head}"
         except GitHubError:
             pass

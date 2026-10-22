@@ -112,9 +112,15 @@ class Application:
         )
 
     # -- workflow operations (delegate to the engine) ------------------------
-    def create(self, full_name: str, number: int, *, workflow_id: Optional[str] = None) -> WorkflowSnapshot:
+    def create(
+        self, full_name: str, number: int, *, workflow_id: Optional[str] = None,
+        user_instructions: str = "", related_pr_numbers: Optional[list[int]] = None,
+        existing_pr_number: Optional[int] = None,
+    ) -> WorkflowSnapshot:
         return self.engine.create_workflow(
-            workflow_id=workflow_id, repository_full_name=full_name, issue_number=number
+            workflow_id=workflow_id, repository_full_name=full_name, issue_number=number,
+            user_instructions=user_instructions, related_pr_numbers=related_pr_numbers,
+            existing_pr_number=existing_pr_number,
         )
 
     def run(self, workflow_id: str) -> WorkflowSnapshot:
@@ -136,7 +142,10 @@ class Application:
         snap = self.engine.get(workflow_id)
         if not snap.worktree_path:
             return ""
-        return self.engine.git.diff(snap.worktree_path, staged=True)
+        return self.engine.git.diff(
+            snap.worktree_path, staged=True,
+            base=(snap.review_base_sha or snap.continuation.base_sha) if snap.continuation else None,
+        )
 
     def learn(self, workflow_id: str):
         """Build, persist, and return a grounded learning report."""
@@ -146,7 +155,10 @@ class Application:
         numstat: list[tuple[int, int, str]] = []
         if snap.worktree_path:
             try:
-                numstat = self.engine.git.diff_numstat(snap.worktree_path, staged=True)
+                numstat = self.engine.git.diff_numstat(
+                    snap.worktree_path, staged=True,
+                    base=(snap.review_base_sha or snap.continuation.base_sha) if snap.continuation else None,
+                )
             except Exception:
                 numstat = []
         report = build_learning_report(snap, numstat)
@@ -162,7 +174,10 @@ class Application:
         numstat = []
         if snap.worktree_path:
             try:
-                numstat = self.engine.git.diff_numstat(snap.worktree_path, staged=True)
+                numstat = self.engine.git.diff_numstat(
+                    snap.worktree_path, staged=True,
+                    base=(snap.review_base_sha or snap.continuation.base_sha) if snap.continuation else None,
+                )
             except Exception:
                 numstat = []
         r = snap.learning_report or build_learning_report(snap, numstat)

@@ -44,10 +44,15 @@ class Settings(BaseSettings):
     # GitHub
     github_backend: GitHubBackend = GitHubBackend.MOCK
     github_token: Optional[str] = None
+    github_login: Optional[str] = None
 
     # Agent runtime
     agent_backend: AgentBackend = AgentBackend.MOCK
     claude_bin: str = "claude"
+
+    # Explicit author and committer identity for contribution commits.
+    git_author_name: str = Field(default="oss-agent", min_length=1)
+    git_author_email: str = Field(default="oss-agent@example.invalid", min_length=1)
 
     # Storage & runtime
     database_url: str = "sqlite:///.oss-agent/oss_agent.db"
@@ -87,6 +92,13 @@ class Settings(BaseSettings):
         if v not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError(f"invalid log level: {v}")
         return v
+
+    @field_validator("git_author_name", "git_author_email", mode="before")
+    @classmethod
+    def _git_identity(cls, v: str) -> str:
+        if any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("Git identity must not contain control characters")
+        return v.strip()
 
     @property
     def github_token_present(self) -> bool:

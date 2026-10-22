@@ -18,6 +18,7 @@ from typing import Optional
 
 from oss_agent.domain.enums import WorkflowState as S
 from oss_agent.domain.models import WorkflowSnapshot
+from oss_agent.observability.report import passed_validation_detail
 
 # Each stage: key, label, agent name, role tagline, and hue.
 STAGE_DEFS: list[dict] = [
@@ -84,7 +85,7 @@ def _evidence(snap: WorkflowSnapshot) -> list[str]:
         score_evi,
         (f"branch {pl.branch_name}" if pl else "pending"),
         (f"{len(im.files_changed)} file(s) changed" if im else "pending"),
-        (f"{tr.total_tests_passed} passed" if tr and tr.passed else ("FAILED" if tr else "pending")),
+        (passed_validation_detail(tr) if tr and tr.passed else ("FAILED" if tr else "pending")),
         (" · ".join(v.verdict.value for v in rev if v) if any(rev) else "pending"),
         (f"PR #{pr.number} opened" if pr and pr.created else ("ready to open" if snap.state == S.READY_FOR_PR else "pending")),
     ]

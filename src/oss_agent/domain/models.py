@@ -505,6 +505,22 @@ class AgentExecution(_Base):
     output_kind: Optional[str] = None
 
 
+class PullRequestContinuation(_Base):
+    """Verified, immutable publication target for an explicitly adopted own PR."""
+
+    number: int = Field(ge=1)
+    repository_full_name: str
+    author: str
+    head_sha: str
+    base_sha: str
+    head_repository_full_name: str
+    head_repository_owner: str
+    head_branch: str
+    base_branch: str
+    draft: bool
+    url: str
+
+
 class WorkflowSnapshot(AgentArtifact):
     """The full, resumable workflow aggregate.
 
@@ -520,6 +536,13 @@ class WorkflowSnapshot(AgentArtifact):
 
     repository_full_name: Optional[str] = None
     issue_number: Optional[int] = None
+    # Direct human task requirements are distinct from untrusted issue/repo text.
+    user_instructions: str = ""
+    related_pr_numbers: list[int] = Field(default_factory=list)
+    existing_pr_number: Optional[int] = Field(default=None, ge=1)
+    continuation: Optional[PullRequestContinuation] = None
+    review_base_sha: Optional[str] = None
+    validated_diff_digest: Optional[str] = None
 
     review_iteration: int = 0
     debug_iteration: int = 0

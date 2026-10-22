@@ -1,6 +1,7 @@
 import pytest
 
 from oss_agent.agents.mock_runner import MockAgentRunner
+from oss_agent.app import Application
 from oss_agent.config.profile import DEFAULT_PROFILE
 from oss_agent.domain.enums import WorkflowState
 from oss_agent.orchestrator.builder import build_engine
@@ -35,6 +36,26 @@ def test_workflow_resumes_from_persisted_state(engine):
     resumed = _sibling_engine(engine).resume("wf-resume")
     assert resumed.state is WorkflowState.READY_FOR_PR
     assert resumed.test_result.passed
+
+
+def test_user_requirements_are_preserved_across_create_and_resume(engine):
+    instructions = "  Keep this change focused.\r\nMeasure the original failure — do not guess.\n"
+    related_prs = [644, 710]
+    app = Application(engine)
+    created = app.create(
+        FULL_NAME, ISSUE_NUMBER, workflow_id="wf-requirements",
+        user_instructions=instructions, related_pr_numbers=related_prs,
+    )
+    assert created.user_instructions == instructions
+    related_prs.append(812)
+
+    engine.step("wf-requirements")
+    resumed = _sibling_engine(engine).resume("wf-requirements")
+
+    assert resumed.state is WorkflowState.READY_FOR_PR
+    assert resumed.user_instructions == instructions
+    assert resumed.related_pr_numbers == [644, 710]
+    assert engine.get("wf-requirements").user_instructions == instructions
 
 
 def test_worktree_creation_is_idempotent_across_steps(engine):

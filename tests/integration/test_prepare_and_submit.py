@@ -11,6 +11,7 @@ import pytest
 
 from oss_agent.app import Application
 from oss_agent.domain.enums import WorkflowState
+from oss_agent.execution.runner import CommandRunner
 from oss_agent.orchestrator.engine import HumanApprovalRequired, SubmissionBlocked
 
 from tests.conftest import FULL_NAME, ISSUE_NUMBER
@@ -71,6 +72,42 @@ def test_full_gated_submission_succeeds(engine):
     assert snap.state is WorkflowState.PR_MONITORING
     assert snap.pull_request.created is True
     assert snap.pull_request.number >= 1
+
+
+def test_submission_commits_with_configured_author_and_committer(engine, fake_repo, monkeypatch):
+    """Publication must not inherit an unrelated account from the host."""
+    engine.settings.git_author_name = "Configured Contributor"
+    engine.settings.git_author_email = "contributor@example.invalid"
+    commands = CommandRunner()
+    commands.run(
+        ["git", "config", "user.name", "Repository Identity"],
+        cwd=fake_repo.path, check=True,
+    )
+    commands.run(
+        ["git", "config", "user.email", "repository@example.invalid"],
+        cwd=fake_repo.path, check=True,
+    )
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Inherited Author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "inherited-author@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Inherited Committer")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "inherited-committer@example.invalid")
+
+    app = Application(engine)
+    _ready(engine, "configured-identity")
+    app.prepare_pr("configured-identity")
+    app.approve("configured-identity")
+    snap = app.submit("configured-identity", confirm=True)
+
+    assert snap.state is WorkflowState.PR_MONITORING
+    assert snap.pull_request.created is True
+    identity = commands.run(
+        ["git", "show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"],
+        cwd=snap.worktree_path, check=True,
+    ).stdout.strip().split("\0")
+    assert identity == [
+        "Configured Contributor", "contributor@example.invalid",
+        "Configured Contributor", "contributor@example.invalid",
+    ]
 
 
 def test_pr_template_is_respected(engine, fake_repo):

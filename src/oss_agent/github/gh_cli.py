@@ -106,7 +106,7 @@ class GhCliGitHubClient(GitHubClient):
             license=(lic.get("spdxId") or lic.get("key")) if isinstance(lic, dict) else None,
             archived=d.get("isArchived", d.get("archived", False)) or False,
             topics=[t.get("name", t) if isinstance(t, dict) else t for t in (d.get("repositoryTopics") or d.get("topics") or [])],
-            url=d.get("url") or d.get("html_url"),
+            url=d.get("html_url") or d.get("url"),
         )
 
     @staticmethod
@@ -120,10 +120,17 @@ class GhCliGitHubClient(GitHubClient):
             author=(d.get("author") or {}).get("login") if isinstance(d.get("author"), dict) else d.get("user", {}).get("login") if isinstance(d.get("user"), dict) else None,
             assignees=[a.get("login", a) if isinstance(a, dict) else a for a in (d.get("assignees") or [])],
             comments=d.get("comments", 0) if isinstance(d.get("comments"), int) else len(d.get("comments", []) or []),
-            url=d.get("url") or d.get("html_url"),
+            url=d.get("html_url") or d.get("url"),
         )
 
     # -- discovery / read -----------------------------------------------------
+    def authenticated_login(self) -> str:
+        data = self._json(["api", "user"])
+        login = data.get("login") if isinstance(data, dict) else None
+        if not login:
+            raise GitHubError("could not verify authenticated GitHub login")
+        return login
+
     _REPO_FIELDS = "name,owner,nameWithOwner,description,primaryLanguage,stargazerCount,forkCount,defaultBranchRef,licenseInfo,isArchived,url"
 
     def search_repositories(self, query: str, *, limit: int = 20) -> list[Repository]:
@@ -231,7 +238,8 @@ class GhCliGitHubClient(GitHubClient):
         return [RepoFile(path=t.get("path", ""), is_dir=t.get("type") == "tree") for t in tree]
 
     # -- pull requests --------------------------------------------------------
-    _PR_FIELDS = "number,title,body,state,headRefName,baseRefName,isDraft,url,author,labels"
+    _PR_FIELDS = ("number,title,body,state,headRefName,baseRefName,isDraft,url,author,labels,"
+                  "headRefOid,baseRefOid,headRepository,headRepositoryOwner")
 
     def _to_pr(self, d: dict[str, Any]) -> PullRequest:
         return PullRequest(
@@ -243,22 +251,47 @@ class GhCliGitHubClient(GitHubClient):
             base=d.get("baseRefName") or d.get("base", {}).get("ref", "main"),
             draft=d.get("isDraft", d.get("draft", False)) or False,
             merged=(d.get("state", "").lower() == "merged") or d.get("merged", False),
-            url=d.get("url") or d.get("html_url"),
+            url=d.get("html_url") or d.get("url"),
             author=(d.get("author") or {}).get("login") if isinstance(d.get("author"), dict) else None,
+            repository_full_name=(d.get("base", {}).get("repo") or {}).get("full_name"),
+            head_sha=d.get("headRefOid") or d.get("head", {}).get("sha"),
+            base_sha=d.get("baseRefOid") or d.get("base", {}).get("sha"),
+            head_repository_full_name=(d.get("headRepository") or {}).get("nameWithOwner")
+            or (d.get("head", {}).get("repo") or {}).get("full_name"),
+            head_repository_owner=(d.get("headRepositoryOwner") or {}).get("login")
+            or ((d.get("head", {}).get("repo") or {}).get("owner") or {}).get("login"),
             labels=[l.get("name", l) if isinstance(l, dict) else l for l in (d.get("labels") or [])],
         )
 
     def list_pull_requests(self, full_name: str, *, state: str = "open") -> list[PullRequest]:
         data = self._json(
-            ["pr", "list", "-R", full_name, "--state", state, "--json", self._PR_FIELDS]
+            ["pr", "list", "-R", full_name, "--state", state, "--limit", "1000", "--json", self._PR_FIELDS]
         ) or []
         return [self._to_pr(d) for d in data]
 
     def get_pull_request(self, full_name: str, number: int) -> PullRequest:
-        data = self._json(["pr", "view", str(number), "-R", full_name, "--json", self._PR_FIELDS])
+        # REST supplies the base repository identity too; a PR number alone is
+        # insufficient to authorize updating a branch in a fork.
+        data = self._json(["api", f"repos/{full_name}/pulls/{number}"])
         if not data:
             raise GitHubError(f"PR not found: {full_name}#{number}")
-        return self._to_pr(data)
+        pr = self._to_pr(data)
+        if isinstance(data.get("user"), dict):
+            pr.author = data["user"].get("login")
+        return pr
+
+    def update_pull_request(
+        self, full_name: str, number: int, *, title: str, body: str,
+    ) -> PullRequest:
+        # Structured stdin preserves multiline bodies and avoids shell parsing.
+        self._run(
+            ["api", "--method", "PATCH", f"repos/{full_name}/pulls/{number}", "--input", "-"],
+            input_text=json.dumps({"title": title, "body": body}),
+        )
+        return self.get_pull_request(full_name, number)
+
+    def get_pull_request_diff(self, full_name: str, number: int) -> str:
+        return self._run(["pr", "diff", str(number), "-R", full_name])
 
     def find_pull_request_by_head(self, full_name: str, head: str) -> Optional[PullRequest]:
         data = self._json(

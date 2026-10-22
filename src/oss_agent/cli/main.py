@@ -161,7 +161,15 @@ def cmd_context(args) -> int:
 
 
 def cmd_create(args) -> int:
-    snap = _app(args).create(args.repository, args.issue, workflow_id=args.id)
+    instructions = ""
+    if args.instructions_file is not None:
+        with Path(args.instructions_file).open(encoding="utf-8", newline="") as source:
+            instructions = source.read()
+    snap = _app(args).create(
+        args.repository, args.issue, workflow_id=args.id,
+        user_instructions=instructions, related_pr_numbers=args.related_pr,
+        existing_pr_number=args.existing_pr,
+    )
     print(f"created workflow {snap.id} targeting {args.repository}#{args.issue}")
     print(f"run it with: oss-agent run {snap.id}")
     return 0
@@ -258,8 +266,17 @@ def cmd_prepare_pr(args) -> int:
     if pr is None:
         print("PR could not be prepared.")
         return 1
-    print(f"Prepared PR for {snap.repository_full_name}#{snap.issue_number} (NOT submitted):\n")
-    print(f"  branch: {snap.branch}")
+    if snap.continuation:
+        target = snap.continuation
+        kind = "draft PR" if target.draft else "PR"
+        print(f"Prepared update to existing {kind} #{target.number} (NOT submitted):\n")
+        print(f"  upstream: {target.repository_full_name}")
+        print(f"  head repository: {target.head_repository_full_name}")
+        print(f"  branch: {target.head_branch}")
+        print(f"  URL: {target.url}")
+    else:
+        print(f"Prepared PR for {snap.repository_full_name}#{snap.issue_number} (NOT submitted):\n")
+        print(f"  branch: {snap.branch}")
     print(f"  title : {pr.title}\n")
     print(pr.body)
     print("\nNothing has been pushed. Review, then:")
@@ -284,10 +301,21 @@ def cmd_submit(args) -> int:
         # Explicit confirmation. Never defaults to yes.
         default_branch = snap.repository.default_branch if snap.repository else "main"
         print("You are about to:\n")
-        print(f"  Push branch:     {snap.branch}")
-        print(f"  Repository:      {snap.repository_full_name}")
-        print(f"  Base branch:     {default_branch}")
-        print(f"  Create PR:       \"{pr.title}\"\n")
+        if snap.continuation:
+            target = snap.continuation
+            kind = "draft PR" if target.draft else "PR"
+            print(f"  Update existing {kind} #{target.number}: \"{pr.title}\"")
+            print(f"  Head repository: {target.head_repository_full_name}")
+            print(f"  Push branch:     {target.head_branch}")
+            print(f"  Repository:      {target.repository_full_name}")
+            print(f"  Base branch:     {target.base_branch}")
+            print(f"  URL:             {target.url}")
+            print("  Draft status is preserved.\n")
+        else:
+            print(f"  Push branch:     {snap.branch}")
+            print(f"  Repository:      {snap.repository_full_name}")
+            print(f"  Base branch:     {default_branch}")
+            print(f"  Create PR:       \"{pr.title}\"\n")
         answer = input("Proceed? [y/N] ").strip().lower()
         confirm = answer in ("y", "yes")
     if not confirm:
@@ -305,9 +333,11 @@ def cmd_submit(args) -> int:
         print(f"Submission refused: {exc}", file=sys.stderr)
         return 1
     if snap.pull_request and snap.pull_request.created:
-        print(f"PR #{snap.pull_request.number} created: {snap.pull_request.url}")
+        action = "updated" if snap.continuation else "created"
+        print(f"PR #{snap.pull_request.number} {action}: {snap.pull_request.url}")
         return 0
-    print(f"PR not created; state {snap.state.value}: {snap.last_error}", file=sys.stderr)
+    action = "updated" if snap.continuation else "created"
+    print(f"PR not {action}; state {snap.state.value}: {snap.last_error}", file=sys.stderr)
     return 1
 
 
@@ -535,6 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     cr.add_argument("repository", help="owner/name")
     cr.add_argument("issue", type=int)
     cr.add_argument("--id", help="explicit workflow id")
+    cr.add_argument("--instructions-file", help="UTF-8 file of human task requirements")
+    cr.add_argument("--related-pr", type=int, action="append", help="related pull request number (repeatable)")
+    cr.add_argument("--existing-pr", type=int, help="continue an existing open PR owned by OSS_AGENT_GITHUB_LOGIN")
     cr.set_defaults(func=cmd_create)
 
     for name, fn, helptext in [
@@ -548,7 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("workflow_id")
         sp.set_defaults(func=fn)
 
-    df = sub.add_parser("diff", help="show the staged diff for human review")
+    df = sub.add_parser("diff", help="show changes for review (full PR delta for continuations)")
     df.add_argument("workflow_id")
     df.set_defaults(func=cmd_diff)
 
@@ -574,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("workflow_id")
     pp.set_defaults(func=cmd_prepare_pr)
 
-    sb = sub.add_parser("submit", help="push the branch and open the PR (human-gated)")
+    sb = sub.add_parser("submit", help="push and open or update the prepared PR (human-gated)")
     sb.add_argument("workflow_id")
     sb.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
     sb.add_argument("--draft", action="store_true")

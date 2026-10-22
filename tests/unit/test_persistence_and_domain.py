@@ -83,7 +83,7 @@ def test_repository_survives_reload_same_database():
 # JSON lacks the newer keys) must still deserialize, with the new fields taking
 # their defaults. These are the fields added during the refactor.
 _NEW_FIELDS = ["suitability", "attempts", "learning_report",
-               "human_approved", "human_decision_note"]
+               "human_approved", "human_decision_note", "user_instructions", "related_pr_numbers"]
 
 
 def test_old_snapshot_without_new_fields_still_loads():
@@ -100,6 +100,8 @@ def test_old_snapshot_without_new_fields_still_loads():
     assert restored.learning_report is None
     assert restored.human_approved is False
     assert restored.human_decision_note is None
+    assert restored.user_instructions == ""
+    assert restored.related_pr_numbers == []
 
 
 def test_old_row_deserializes_through_the_sql_store():
@@ -122,3 +124,5 @@ def test_old_row_deserializes_through_the_sql_store():
     loaded = repo.get("legacy2")
     assert loaded is not None
     assert loaded.attempts == [] and loaded.human_approved is False
+    assert loaded.user_instructions == ""
+    assert loaded.related_pr_numbers == []

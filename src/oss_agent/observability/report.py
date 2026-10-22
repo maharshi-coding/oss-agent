@@ -7,7 +7,7 @@ stage plus its captured evidence. Used by ``oss-agent status``.
 from __future__ import annotations
 
 from oss_agent.domain.enums import WorkflowState as S
-from oss_agent.domain.models import WorkflowSnapshot
+from oss_agent.domain.models import TestResult, WorkflowSnapshot
 
 # The ordered pipeline stages shown on the board and how to read each one.
 _STAGES: list[tuple[str, str]] = [
@@ -31,6 +31,19 @@ _STAGES: list[tuple[str, str]] = [
 _OK = "[x]"
 _FAIL = "[!]"
 _PENDING = "[ ]"
+
+
+def passed_validation_detail(result: TestResult) -> str:
+    """Summarize green quality suites without converting unknown counts to zero."""
+    executed = result.executed_suites
+    suite_label = "suite" if len(executed) == 1 else "suites"
+    summary = f"{len(executed)} executed quality {suite_label} passed"
+    observed = [suite.tests_passed for suite in executed if suite.tests_passed is not None]
+    if observed:
+        count = sum(observed)
+        case_label = "case" if count == 1 else "cases"
+        return f"{summary}; {count} observed test {case_label} passed"
+    return f"{summary}; case counts unavailable"
 
 
 def _stage_line(snapshot: WorkflowSnapshot, label: str, attr: str) -> str:
@@ -57,7 +70,7 @@ def _stage_line(snapshot: WorkflowSnapshot, label: str, attr: str) -> str:
     if attr == "test_result" and snapshot.test_result is not None:
         tr = snapshot.test_result
         mark = _OK if tr.passed else _FAIL
-        detail = f"{tr.total_tests_passed} passed" if tr.passed else "FAILED"
+        detail = passed_validation_detail(tr) if tr.passed else "FAILED"
     if attr in ("code_review", "security_review", "maintainer_review"):
         value = getattr(snapshot, attr)
         if value is not None:

@@ -25,6 +25,26 @@ def test_settings_token_presence():
     assert Settings(github_token="x").github_token_present
 
 
+def test_settings_load_git_identity_from_environment(monkeypatch):
+    monkeypatch.setenv("OSS_AGENT_GIT_AUTHOR_NAME", "Configured Contributor")
+    monkeypatch.setenv("OSS_AGENT_GIT_AUTHOR_EMAIL", "contributor@example.invalid")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.git_author_name == "Configured Contributor"
+    assert settings.git_author_email == "contributor@example.invalid"
+
+
+def test_settings_default_git_identity(monkeypatch):
+    monkeypatch.delenv("OSS_AGENT_GIT_AUTHOR_NAME", raising=False)
+    monkeypatch.delenv("OSS_AGENT_GIT_AUTHOR_EMAIL", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.git_author_name == "oss-agent"
+    assert settings.git_author_email == "oss-agent@example.invalid"
+
+
 def test_load_profile_from_yaml(tmp_path):
     p = tmp_path / "profile.yaml"
     p.write_text(

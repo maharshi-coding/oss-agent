@@ -108,6 +108,7 @@ def slugify_solution() -> Solution:
 def test_settings(tmp_path: Path) -> Settings:
     return Settings(
         github_backend="mock",
+        github_login=None,
         agent_backend="mock",
         database_url="sqlite:///:memory:",
         worktree_root=str(tmp_path / "worktrees"),

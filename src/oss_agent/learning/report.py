@@ -38,9 +38,12 @@ def build_learning_report(
     """
     a = snap.issue_analysis
     plan = snap.plan
-    impl = snap.implementation
     tr = snap.test_result
     issue = snap.issue
+    # A continuation's latest implementation can delete files added by its
+    # existing PR. Only the complete recorded diff describes the final scope.
+    files_that_matter = list(dict.fromkeys(path for _, _, path in changed))
+    revised_scope = bool(snap.continuation or snap.review_iteration)
 
     ctype = a.contribution_type if a else (plan.contribution_type if plan else ContributionType.BUG_FIX)
     title = (issue.title if issue else None) or (plan.objective if plan else "Contribution")
@@ -50,16 +53,16 @@ def build_learning_report(
     why_broken = (
         f"Expected behavior: {expected}. " if expected else ""
     ) + (
-        f"The plan targeted the root cause in: {', '.join(plan.affected_files)}."
-        if plan and plan.affected_files else
-        "Root cause was localized during planning."
+        f"The recorded final diff changes: {', '.join(files_that_matter)}."
+        if files_that_matter else
+        "Final changed-file evidence is not available yet."
     )
 
     rc = snap.repository_context
     if rc and (rc.likely_files or rc.relevant_symbols):
         sym = ", ".join(f"{s.name} ({s.file}:{s.line})" for s in rc.relevant_symbols[:3])
         how_discovered = (
-            "Repository-context selection (keyword/symbol search over the checked-out "
+            "Initial repository-context selection (keyword/symbol search over the checked-out "
             f"code) surfaced likely files: {', '.join(rc.likely_files[:4]) or '—'}"
             + (f"; key symbols: {sym}" if sym else "")
             + "."
@@ -67,21 +70,28 @@ def build_learning_report(
     else:
         probable = (a.probable_files if a else []) or (plan.affected_files if plan else [])
         how_discovered = (
-            f"Relevant code was located from the issue and repository analysis: "
+            f"Initial issue analysis and planning referenced: "
             f"{', '.join(probable) if probable else 'no explicit file references; located during planning'}."
         )
 
-    files_that_matter = [fc.path for fc in (impl.files_changed if impl else [])]
     what_changed = [
         f"{path}  (+{add}/-{dele})" for add, dele, path in changed
     ] or ["(no textual diff captured)"]
 
     tests_passed = bool(tr and tr.passed)
+    validation = "Validation is not yet green; the fix is not proven."
+    if tr is not None and tests_passed:
+        executed = tr.executed_suites
+        suite_label = "suite" if len(executed) == 1 else "suites"
+        validation = f"{len(executed)} executed quality {suite_label} passed."
+        observed_counts = [suite.tests_passed for suite in executed if suite.tests_passed is not None]
+        if observed_counts:
+            count = sum(observed_counts)
+            case_label = "case" if count == 1 else "cases"
+            validation += f" Captured counts show {count} passing test {case_label}."
     why_fix_works = (
-        (f"{plan.objective}. " if plan else "")
-        + ("The full validation suite passes on the change, "
-           f"capturing {tr.total_tests_passed} passing test(s)." if tests_passed
-           else "Validation is not yet green; the fix is not proven.")
+        (f"{plan.objective}. " if plan and not revised_scope else "")
+        + validation
     )
 
     tests_that_prove_it: list[str] = []
@@ -94,15 +104,25 @@ def build_learning_report(
                           else ("passed" if suite.passed else "FAILED"))
                 tests_that_prove_it.append(f"{suite.name} ({suite.kind}): {detail}")
 
-    tradeoffs = list(dict.fromkeys((plan.risks if plan else []) + (a.risks if a else [])))
+    plan_risks = [
+        f"Initial plan risk (historical): {risk}" if revised_scope else risk
+        for risk in (plan.risks if plan else [])
+    ]
+    tradeoffs = list(dict.fromkeys(plan_risks + (a.risks if a else [])))
     edge_cases: list[str] = []
     if a and a.breaking_change_risk >= 0.3:
         edge_cases.append("Potential behavior change for existing callers (breaking-change risk).")
     if a and a.security_sensitivity >= 0.3:
         edge_cases.append("Security-sensitive area — validate inputs and error paths.")
     if plan and plan.acceptance_criteria:
-        edge_cases.append("Confirm every acceptance criterion is covered: "
-                          + "; ".join(plan.acceptance_criteria[:3]) + ".")
+        if revised_scope:
+            edge_cases.append(
+                "Reconcile the final reviewed requirements with the initial plan; "
+                "earlier acceptance criteria may have been revised."
+            )
+        else:
+            edge_cases.append("Confirm every acceptance criterion is covered: "
+                              + "; ".join(plan.acceptance_criteria[:3]) + ".")
     if not edge_cases:
         edge_cases.append("No high-risk edge cases were flagged by the analysis; review the diff regardless.")
 
@@ -116,9 +136,15 @@ def build_learning_report(
         "What tests prove the fix, and what remains uncovered?",
     ]
     if tradeoffs:
-        questions.append(f"What tradeoffs does this introduce? ({tradeoffs[0]})")
+        questions.append(
+            f"Which initially recorded risks apply to the final diff? ({tradeoffs[0]})"
+            if revised_scope else f"What tradeoffs does this introduce? ({tradeoffs[0]})"
+        )
     if plan and plan.acceptance_criteria:
-        questions.append("Does the change satisfy every stated acceptance criterion?")
+        questions.append(
+            "How does the final diff satisfy the current reviewed requirements?"
+            if revised_scope else "Does the change satisfy every stated acceptance criterion?"
+        )
 
     return LearningReport(
         repository_full_name=snap.repository_full_name or "",

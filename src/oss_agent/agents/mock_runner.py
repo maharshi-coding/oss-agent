@@ -629,8 +629,8 @@ class MockAgentRunner(AgentRunner):
             tests_line += "\n"
         summary_block = (
             f"## Summary\n\n{plan.objective if plan else ''}\n\n"
-            f"Closes #{issue_no}.\n\n"
-            f"## Changes\n\n" + ("".join(f"- `{p}`\n" for p in changed) or "- (see diff)\n") +
+            + (f"Related to #{issue_no}.\n\n" if ctx.snapshot.continuation else f"Closes #{issue_no}.\n\n")
+            + f"## Changes\n\n" + ("".join(f"- `{p}`\n" for p in changed) or "- (see diff)\n") +
             f"\n## Verification\n\n{tests_line}"
             f"- Code review: {s.code_review.verdict.value if s.code_review else 'n/a'}\n"
             f"- Security review: {s.security_review.verdict.value if s.security_review else 'n/a'}\n"
@@ -666,4 +666,8 @@ class MockAgentRunner(AgentRunner):
     def _current_diff(self, ctx: AgentContext) -> str:
         if ctx.worktree is None:
             return ""
-        return ctx.git.diff(ctx.worktree.path, staged=True)
+        return ctx.git.diff(
+            ctx.worktree.path, staged=True,
+            base=(ctx.snapshot.review_base_sha or ctx.snapshot.continuation.base_sha)
+            if ctx.snapshot.continuation else None,
+        )

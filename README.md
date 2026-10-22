@@ -133,16 +133,16 @@ Switch `OSS_AGENT_GITHUB_BACKEND=gh` (uses the authenticated [`gh` CLI](https://
 | `oss-agent context <repo> <n>` | likely files/tests/symbols for an issue |
 | `oss-agent scout [--language/--label/--difficulty/--mode]` | queue ranked opportunities |
 | `oss-agent queue` / `promote` / `dismiss` | manage the opportunity queue |
-| `oss-agent create <repo> <n>` | create a workflow for an issue |
+| `oss-agent create <repo> <n>` | create a workflow; `--existing-pr <n>` adopts your own open PR |
 | `oss-agent run <id>` | run to `READY_FOR_PR` |
 | `oss-agent resume <id>` | resume from last persisted state |
 | `oss-agent status <id>` | status board |
 | `oss-agent attempts <id>` | implement/repair attempt history |
-| `oss-agent diff <id>` | show the staged diff for review |
+| `oss-agent diff <id>` | show changes for review; existing PR continuations include the full PR delta |
 | `oss-agent learn <id>` / `explain <id>` | grounded learning report |
 | `oss-agent approve <id>` / `reject <id>` | record the human decision |
 | `oss-agent prepare-pr <id>` | compose the PR (pushes nothing) |
-| `oss-agent submit <id>` | push + open the PR (human-gated) |
+| `oss-agent submit <id>` | push + open or update the prepared PR (human-gated) |
 | `oss-agent monitor` | list PRs being monitored |
 | `oss-agent list [--state]` | list workflows |
 | `oss-agent visualize [id]` | pixel-world workflow visualizer (HTML) |
@@ -150,6 +150,51 @@ Switch `OSS_AGENT_GITHUB_BACKEND=gh` (uses the authenticated [`gh` CLI](https://
 | `oss-agent cleanup [--all]` | remove worktrees |
 
 Global flags: `--json` (machine-readable output on read commands), `--quiet/--verbose/--debug`, `--log-json`. The CLI never bypasses a safety control.
+
+Use `create --instructions-file task.md --related-pr 123` to preserve your task
+requirements and request review of related PRs. Repeat `--related-pr` for each PR.
+The live backend records fetched build files, open PR metadata, related diffs,
+and retrieval errors under `.oss-agent/runs/<id>/research.json`; those inputs are
+research evidence, not executed validation results.
+
+To revalidate or refine **your own existing open PR**, set
+`OSS_AGENT_GITHUB_LOGIN` to the expected authenticated account and use
+`create <repo> <issue> --existing-pr <number>`. The agent verifies the PR's author,
+owned fork, branch, and exact head/base commits, then starts an isolated worktree
+at that PR's head. All suitability, testing, and independent review gates still
+run, and reviewers see the complete PR delta. After `prepare-pr`, `approve`, and
+explicit `submit` confirmation, it fast-forwards only that fork branch and updates
+the same PR, preserving its draft state. It never force-pushes, rewrites existing
+commits, or opens a second PR. No incremental changes means no empty commit or
+push. Changed upstream metadata or conflicting work requires reassessment.
+
+Configure both contribution identity fields in your local `.env` before running
+a live contribution: `OSS_AGENT_GIT_AUTHOR_NAME` and
+`OSS_AGENT_GIT_AUTHOR_EMAIL`. They set the author **and** committer of new commits;
+OSS-Agent verifies that metadata before pushing. The host's default identity is
+not used in place of these values, and adopting a PR preserves its existing
+commits. Set `OSS_AGENT_GITHUB_BACKEND=gh` and
+`OSS_AGENT_AGENT_BACKEND=claude` for live backends, and verify the expected account
+with `gh api user --jq .login`.
+
+Prepare and inspect the result before approving it:
+
+```bash
+oss-agent create owner/repo 123 --id revalidate-123 --existing-pr 456 \
+  --instructions-file task.md --related-pr 789
+oss-agent run revalidate-123
+oss-agent diff revalidate-123
+oss-agent learn revalidate-123
+oss-agent prepare-pr revalidate-123
+oss-agent approve revalidate-123
+oss-agent submit revalidate-123  # asks for explicit confirmation
+```
+
+`run` stops at `READY_FOR_PR` after the review gates. Preparing an existing PR's
+description again clears its previous human approval, so inspect and approve the
+new description before submission. `submit` preserves an adopted PR's draft
+status. Repository research and previous reports are inputs to validation;
+neither substitutes for recorded command results or visual evidence.
 
 </details>
 
@@ -180,11 +225,14 @@ oss-agent init   # copies example configs and creates runtime dirs, then edit:
 | --- | --- | --- |
 | `OSS_AGENT_GITHUB_BACKEND` | `mock` \| `gh` \| `api` | `mock` |
 | `OSS_AGENT_AGENT_BACKEND` | `mock` \| `claude` | `mock` |
+| `OSS_AGENT_GITHUB_LOGIN` | expected GitHub account, required for existing PR continuation | unset |
+| `OSS_AGENT_GIT_AUTHOR_NAME` | contribution commit author and committer name | `oss-agent` |
+| `OSS_AGENT_GIT_AUTHOR_EMAIL` | contribution commit author and committer email | `oss-agent@example.invalid` |
 | `OSS_AGENT_DATABASE_URL` | workflow store | `sqlite:///.oss-agent/oss_agent.db` |
 | `OSS_AGENT_MAX_REVIEW_ITERATIONS` | review-loop cap | `3` |
 | `OSS_AGENT_PROTECTED_BRANCHES` | never-push branches | `main,master,develop,release` |
 
-The `gh` backend uses the `gh` CLI's own auth (`gh auth login`) — OSS-Agent stores no token. See [.env.example](.env.example).
+The `gh` backend uses the `gh` CLI's own auth (`gh auth login`) — OSS-Agent stores no token. The `api` backend is reserved and not implemented; use `gh` for live GitHub access. See [.env.example](.env.example).
 
 </details>
 
